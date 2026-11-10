@@ -408,7 +408,7 @@ function viewLobby() {
     </div>
     <div class="panel" id="members">${listHTML()}</div>
     <div class="sticky-cta">
-      ${store.mode === 'local' && isHost() ? `<button class="btn ghost" id="bot">+ Add test friend</button>` : ''}
+      ${isHost() ? `<button class="btn ghost" id="bot">+ Add test friend</button>` : ''}
       ${isHost()
         ? `<button class="btn primary big" id="start">Everyone’s in — lock it <i>→</i></button>`
         : `<p class="waiting-line"><span class="pulse"></span>Waiting for ${esc(memberName(G.host))} to lock the squad</p>`}
@@ -888,9 +888,9 @@ function closeSheet() {
 }
 addEventListener('keydown', e => { if (e.key === 'Escape') closeSheet(); });
 
-// ---------- test friends (local mode only): they answer each step a moment after it opens
+// ---------- test friends: simulated squad members, driven by the host's device
 function runBots() {
-  if (store.mode !== 'local' || !isHost()) return;
+  if (!isHost()) return;
   const st = G.stage;
   // Test friends only answer after you've locked in, one at a time, so you're never rushed.
   if (!GATED.includes(st) || !G.done?.[st]?.[me]) return;

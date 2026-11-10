@@ -5,5 +5,5 @@
 //   firebaseUrl: "https://khao-12345-default-rtdb.asia-southeast1.firebasedatabase.app"
 // See README.md for the 2-minute setup and security rules.
 window.KHAO_CONFIG = {
-  firebaseUrl: ""
+  firebaseUrl: "https://khao-10c77-default-rtdb.asia-southeast1.firebasedatabase.app"
 };
