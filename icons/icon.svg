@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="112" fill="#111110"/>
+  <circle cx="256" cy="232" r="132" fill="none" stroke="#F3F2EE" stroke-width="22"/>
+  <circle cx="256" cy="232" r="84" fill="#F3F2EE"/>
+  <text x="256" y="452" text-anchor="middle" font-family="Arial Black, Helvetica, sans-serif" font-weight="900" font-size="78" letter-spacing="6" fill="#F3F2EE">KHAO</text>
+</svg>
