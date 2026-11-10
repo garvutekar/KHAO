@@ -293,3 +293,82 @@ export async function googleLookup({ refs, origin, key }) {
   }));
   return [...found.values()];
 }
+
+// ---------- Overture Maps places (free, unlimited: pre-built tiles served with the app)
+// Built by tools/build_tiles.py. Each tile is a 0.05° square; records are
+// [id, name, lat, lon, category, confidence, address, phone, website, social].
+let tileIndex;
+const tileCache = new Map();
+const loadIndex = () => tileIndex ||= fetch('data/tiles/index.json').then(r => r.ok ? r.json() : null).catch(() => null);
+const loadTile = key => {
+  if (!tileCache.has(key)) tileCache.set(key, fetch(`data/tiles/${key}.json`).then(r => r.ok ? r.json() : []).catch(() => []));
+  return tileCache.get(key);
+};
+
+// Names often carry branch info: "Domino's Pizza | Landmark Plaza, Langford Road" → "Domino's Pizza".
+const cleanName = n => n.split(/\s+[|•]\s+|\s+-\s+(?=[A-Z0-9])/)[0].trim();
+const MEAT_ONLY = /\bchicken\b|\bmutton\b|\bmeat\b|non[\s-]?veg|military hotel|\bfish\b|seafood|\bsteak/i;
+const MEAT_CATS = new Set(['chicken_restaurant', 'chicken_wings_restaurant', 'steakhouse', 'seafood_restaurant', 'barbecue_restaurant', 'fish_and_chips_restaurant']);
+const CHEAP = new Set(['fast_food_restaurant', 'food_truck_stand', 'street_vendor', 'bakery', 'tea_room', 'smoothie_juice_bar', 'ice_cream_shop', 'food_court', 'sandwich_shop', 'donut_shop']);
+const PRICEY = new Set(['steakhouse', 'japanese_restaurant', 'sushi_restaurant', 'european_restaurant', 'french_restaurant', 'lounge', 'gastropub', 'wine_bar']);
+
+function matchCuisine(name, cat, defs) {
+  const n = name.toLowerCase();
+  return defs.find(d => d.kw.some(k => n.includes(k))) || defs.find(d => d.ov.includes(cat));
+}
+
+function fromOverture(rec, def, origin) {
+  const [id, rawName, lat, lon, cat, conf, addr, phone, website, social] = rec;
+  const name = cleanName(rawName) || rawName;
+  const pure = cat === 'vegetarian_restaurant' || cat === 'vegan_restaurant' || PURE_VEG_NAME.test(name);
+  const meatOnly = !pure && (MEAT_CATS.has(cat) || MEAT_ONLY.test(name));
+  return {
+    id: 'o' + id, name, cuisineId: def.id,
+    cuisineLabel: cat && cat !== 'restaurant' ? cat.replace(/_restaurant$/, '').replace(/_/g, ' ') : def.name,
+    lat, lon, distKm: +distKm(origin, { lat, lon }).toFixed(1),
+    budget: CHEAP.has(cat) ? 1 : PRICEY.has(cat) ? 3 : 2,
+    conf,
+    diet: { veg: pure ? 'only' : meatOnly ? 'no' : '', vegan: cat === 'vegan_restaurant' ? 'yes' : '', jain: '', halal: '' },
+    addr, hours: '', phone, website,
+    instagram: /instagram\.com/.test(social) ? social : '', social,
+    delivery: false, outdoor: false,
+  };
+}
+
+// Higher confidence, an actual web/social presence, and closeness all count.
+const oScore = r => r.conf + (r.website ? .15 : 0) + (r.social ? .15 : 0) + (r.phone ? .1 : 0) - r.distKm * .08;
+
+export async function findOverture({ lat, lon, cuisines, diet = 'any' }) {
+  const index = await loadIndex();
+  if (!index) throw new Error('No Overture tiles');
+  const T = index.tile, have = new Set(index.tiles);
+  const origin = { lat, lon };
+  const defs = cuisines.map(id => CUISINE_BY_ID[id]).filter(Boolean);
+  let byCuisine = {};
+  for (const radius of [3, 6]) {
+    const dLat = radius / 111, dLon = radius / (111 * Math.cos(lat * Math.PI / 180));
+    const keys = [];
+    for (let y = Math.floor((lat - dLat) / T); y <= Math.floor((lat + dLat) / T); y++)
+      for (let x = Math.floor((lon - dLon) / T); x <= Math.floor((lon + dLon) / T); x++)
+        if (have.has(`${y}_${x}`)) keys.push(`${y}_${x}`);
+    if (!keys.length) throw new Error('Area not covered by Overture tiles');
+    const recs = (await Promise.all(keys.map(loadTile))).flat();
+    byCuisine = {};
+    const seen = new Set();
+    for (const rec of recs) {
+      const def = matchCuisine(rec[1], rec[4], defs);
+      if (!def) continue;
+      const r = fromOverture(rec, def, origin);
+      const dupe = r.name.toLowerCase().replace(/[^a-z0-9]/g, '');
+      if (r.distKm > radius || seen.has(dupe) || !dietOk(r, diet)) continue;
+      seen.add(dupe);
+      (byCuisine[def.id] ||= []).push(r);
+    }
+    if (defs.every(d => (byCuisine[d.id] || []).length >= 4)) break;
+  }
+  const lists = defs.map(d => (byCuisine[d.id] || []).sort((a, b) => oScore(b) - oScore(a)).slice(0, 6));
+  const out = [];
+  for (let i = 0; i < 6; i++) lists.forEach(l => l[i] && out.push(l[i]));
+  if (out.length < 3) throw new Error('Too few Overture places here');
+  return { source: 'overture', list: out };
+}

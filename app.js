@@ -1,9 +1,11 @@
 import { CUISINES, CUISINE_BY_ID, BUDGETS, DIETS, SPICE, ALLERGIES, AVATAR_TONES, BOT_NAMES } from './data.js';
 import { createStore } from './store.js';
-import { geocode, reverseGeocode, findRestaurants, findGoogle, googleLookup, photoUrl } from './places.js';
+import { geocode, reverseGeocode, findRestaurants, findOverture, findGoogle, googleLookup, photoUrl } from './places.js';
 
 const store = createStore(window.KHAO_CONFIG || {});
 const GKEY = (window.KHAO_CONFIG || {}).googleMapsKey || '';
+// Paid Google Places search is opt-in; the free Overture tiles are the default restaurant source.
+const GPLACES = !!(window.KHAO_CONFIG || {}).useGooglePlaces && !!GKEY;
 const STAGES = ['lobby', 'dates', 'prefs', 'place', 'cuisines', 'restaurants', 'results'];
 const GATED = ['dates', 'prefs', 'place', 'cuisines', 'restaurants'];
 const LABEL = { lobby: 'Squad', dates: 'Dates', prefs: 'Prefs', place: 'Spot + ₹', cuisines: 'Cuisines', restaurants: 'Places', results: 'The match' };
@@ -644,7 +646,7 @@ function viewScouting() {
     html: `
     ${stageHead(6, 'The top 3', 'Cuisines that made the cut')}
     <ol class="podium">${top.map((t, i) => `<li style="--tone:${t.c.tone}"><b>${pad(i + 1)}</b><span class="p-emoji">${t.c.emoji}</span><span class="p-name">${t.c.name}</span><em>${t.pct}%</em></li>`).join('')}</ol>
-    <div class="center-msg compact"><div class="spinner"></div><p class="eyebrow">Scouting spots near ${esc(meet?.label || 'you')}</p><p class="fine">${GKEY ? 'Pulling real restaurants, photos and reviews from Google…' : 'Pulling real restaurants from OpenStreetMap…'}</p></div>`,
+    <div class="center-msg compact"><div class="spinner"></div><p class="eyebrow">Scouting spots near ${esc(meet?.label || 'you')}</p><p class="fine">Finding real restaurants near the squad…</p></div>`,
   };
 }
 
@@ -665,8 +667,11 @@ async function fetchRestaurants() {
     const meet = meetingPoint() || { lat: 19.076, lon: 72.8777, budget: 2, label: 'Mumbai' };
     const args = { ...meet, cuisines: topCuisines().map(t => t.c.id), diet: dietMode() };
     let res = null;
-    if (GKEY) {
-      try { res = await findGoogle({ ...args, key: GKEY }); } catch (e) { console.warn('Google Places unavailable, using OpenStreetMap', e); }
+    if (GPLACES) {
+      try { res = await findGoogle({ ...args, key: GKEY }); } catch (e) { console.warn('Google Places unavailable', e); }
+    }
+    if (!res) {
+      try { res = await findOverture(args); } catch (e) { console.warn('Overture tiles unavailable here, using OpenStreetMap', e); }
     }
     res ||= await findRestaurants(args);
     await set('meet', { ...meet, source: res.source });
@@ -845,37 +850,28 @@ function viewResults() {
 const VIEWS = { lobby: viewLobby, dates: viewDates, prefs: viewPrefs, place: viewPlace, cuisines: viewCuisines, restaurants: viewRestaurants, results: viewResults };
 
 // ---------- detail sheet (map + reviews)
-let leafletReady;
-function loadLeaflet() {
-  return leafletReady ||= new Promise((res, rej) => {
-    const css = document.createElement('link');
-    css.rel = 'stylesheet'; css.href = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';
-    document.head.appendChild(css);
-    const s = document.createElement('script');
-    s.src = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
-    s.onload = () => res(window.L); s.onerror = rej;
-    document.head.appendChild(s);
-  });
-}
 
 function openSheet(id) {
   const r = placeList().find(x => x.id === id);
   if (!r) return;
   sheetRid = id;
-  const c = CUISINE_BY_ID[r.cuisineId];
   const score = restScores().find(x => x.r.id === id);
   const q = encodeURIComponent(`${r.name} ${r.addr || G.meet?.label || ''}`);
   const google = r.g && GKEY;
+  // Google's own map for every spot. With a key, the official Embed API (free, unlimited) shows Google's
+  // place card with its rating; without one, the classic keyless embed pins the exact coordinates.
+  const mapQuery = `${r.name}, ${r.addr || G.meet?.label || ''}`;
+  const mapSrc = GKEY
+    ? `https://www.google.com/maps/embed/v1/place?key=${encodeURIComponent(GKEY)}&q=${r.g ? `place_id:${encodeURIComponent(r.id)}` : encodeURIComponent(mapQuery)}&center=${r.lat},${r.lon}&zoom=16`
+    : `https://maps.google.com/maps?q=${r.lat},${r.lon}&z=17&output=embed`;
   const reviewsUrl = r.mapsUri || `https://www.google.com/maps/search/?api=1&query=${q}`;
   const sheet = $('#sheet');
   sheet.innerHTML = `
     <div class="sheet-bg" data-close></div>
     <div class="sheet-panel" role="dialog" aria-label="${esc(r.name)}">
       <button class="sheet-x" data-close aria-label="Close">✕</button>
-      <div class="map" id="map">${google
-        ? `<iframe title="Map of ${esc(r.name)}" loading="lazy" referrerpolicy="no-referrer-when-downgrade" allowfullscreen
-             src="https://www.google.com/maps/embed/v1/place?key=${encodeURIComponent(GKEY)}&q=place_id:${encodeURIComponent(r.id)}&zoom=16"></iframe>`
-        : `<span class="r-emoji">${c.emoji}</span>`}</div>
+      <div class="map" id="map"><iframe title="Map of ${esc(r.name)}" referrerpolicy="no-referrer-when-downgrade" allowfullscreen
+             src="${esc(mapSrc)}"></iframe></div>
       ${google && r.photos?.length ? `<div class="gallery">${r.photos.map(ph => `<figure>
           <img loading="lazy" src="${photoUrl(ph.name, GKEY, 800)}" alt="Photo of ${esc(r.name)}">
           <figcaption>${ph.by ? `Photo: ${ph.byUri ? `<a target="_blank" rel="noopener" href="${esc(ph.byUri)}">${esc(ph.by)}</a>` : esc(ph.by)}` : 'Photo'} · Google</figcaption>
@@ -894,12 +890,13 @@ function openSheet(id) {
           ${r.addr ? `<dt>Address</dt><dd>${esc(r.addr)}</dd>` : ''}
           ${r.week?.length ? `<dt>Hours</dt><dd>${r.hours ? `<b>${esc(r.hours)}</b><br>` : ''}${r.week.map(esc).join('<br>')}</dd>` : r.hours ? `<dt>Hours</dt><dd>${esc(r.hours)}</dd>` : ''}
           ${r.phone ? `<dt>Phone</dt><dd><a href="tel:${esc(r.phone)}">${esc(r.phone)}</a></dd>` : ''}
+          ${r.instagram ? `<dt>Insta</dt><dd><a target="_blank" rel="noopener" href="${esc(r.instagram)}">${esc(r.instagram.replace(/^https?:\/\/(www\.)?instagram\.com\//, '@').replace(/\/$/, ''))}</a></dd>` : ''}
           ${r.website ? `<dt>Web</dt><dd><a target="_blank" rel="noopener" href="${esc(r.website)}">${esc(r.website.replace(/^https?:\/\//, ''))}</a></dd>` : ''}
           <dt>Diet</dt><dd>${dietBadges(r) || 'Not listed — call ahead if strict.'}</dd>
         </dl>
         <div class="btn-row">
           <a class="btn primary" target="_blank" rel="noopener" href="https://www.google.com/maps/dir/?api=1&destination=${r.lat},${r.lon}${r.g ? `&destination_place_id=${encodeURIComponent(r.id)}` : ''}">Directions</a>
-          <a class="btn ghost" target="_blank" rel="noopener" href="${esc(reviewsUrl)}">${r.g ? 'Open in Google Maps ↗' : 'Public reviews ↗'}</a>
+          <a class="btn ghost" target="_blank" rel="noopener" href="${esc(reviewsUrl)}">${r.g ? 'Open in Google Maps ↗' : 'Photos &amp; reviews ↗'}</a>
         </div>
         ${r.gReviews?.length ? `<section class="reviews g-reviews">
           <div class="count-row"><span class="eyebrow">Google reviews</span></div>
@@ -916,7 +913,7 @@ function openSheet(id) {
             <button class="btn small">Post review</button>
           </form>
         </section>
-        <p class="fine">${r.g ? 'Place info, photos and reviews from Google Maps.' : 'Place data © OpenStreetMap contributors.'} Squad ratings come only from people in this plan.</p>
+        <p class="fine">${r.g ? 'Place info, photos and reviews from Google Maps.' : r.id.startsWith('o') ? 'Place data: Overture Maps Foundation (Meta, Microsoft, Foursquare &amp; more). Map: Google.' : 'Place data © OpenStreetMap contributors. Map: Google.'} Squad ratings come only from people in this plan.</p>
       </div>
     </div>`;
   sheet.hidden = false;
@@ -937,18 +934,6 @@ function openSheet(id) {
   };
   renderSheetReviews();
 
-  if (google) return;
-  loadLeaflet().then(L => {
-    if (sheetRid !== id) return;
-    const el = $('#map');
-    el.innerHTML = '';
-    const map = L.map(el, { zoomControl: false, attributionControl: true }).setView([r.lat, r.lon], 16);
-    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      maxZoom: 19, attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
-    }).addTo(map);
-    L.marker([r.lat, r.lon], { icon: L.divIcon({ className: 'pin', html: `<span>${c.emoji}</span>`, iconSize: [44, 44], iconAnchor: [22, 44] }) }).addTo(map);
-    if (G.meet) L.circleMarker([G.meet.lat, G.meet.lon], { radius: 7, color: '#111', weight: 2, fillColor: '#fff', fillOpacity: 1 }).addTo(map).bindTooltip('Squad midpoint');
-  }).catch(() => {});
 }
 
 function renderSheetReviews() {

@@ -17,15 +17,26 @@ Each step waits until everyone is done. The host can skip people who are too slo
 ## Free stack
 | Need | Service | Cost |
 |---|---|---|
-| Area search / reverse geocode | Nominatim (OpenStreetMap) | Free, about 1 req/s |
-| Restaurants with photos, ratings, reviews | Google Places API (New), when a key is set | Free monthly allowance, then billed |
-| Restaurants (no key) | Overpass API (OSM), Photon (komoot) as fallback | Free |
-| Map | Leaflet + OpenStreetMap tiles | Free with attribution |
-| Real-time group sync | Firebase Realtime Database (REST + SSE, no SDK) | Free Spark plan |
-| Hosting | GitHub Pages / Netlify / Vercel / Cloudflare Pages | Free |
+| Restaurants (14 Indian metros, ~100k places) | **Overture Maps** places, pre-built into `data/tiles/` and served with the app | Free, unlimited |
+| Restaurants (anywhere else) | OpenStreetMap: Overpass, with Photon as backup | Free |
+| Area search | Nominatim (OpenStreetMap) | Free, about 1 req/s |
+| Restaurant map | Google Maps embed (keyless; or the official Embed API with a key) | Free, unlimited |
+| Group sync | Firebase Realtime Database (REST + SSE, no SDK) | Free Spark plan |
+| Hosting | GitHub Pages | Free |
 
-Ratings and reviews come from the **squad itself** (stars and a note per person). There's also a "Public reviews" link-out to Google Maps. No paid Places API is used, so KHAO doesn't make up ratings.
-Budget tiers are **estimates** based on place type and cuisine, because OSM rarely stores prices.
+There are no restaurant photos, and ratings come from the squad itself. The **Photos & reviews** button opens the place on Google Maps.
+
+## Restaurant data: Overture tiles
+`tools/build_tiles.py` downloads [Overture Maps](https://overturemaps.org) places for each city, keeps food spots (no bars, confidence ≥ 0.45, not closed), and writes 0.05° tiles to `data/tiles/`. The app only loads the tiles around the squad's meeting point.
+
+Cities: Mumbai, Delhi NCR, Bengaluru, Hyderabad, Chennai, Kolkata, Pune, Ahmedabad, Jaipur, Chandigarh, Lucknow, Kochi, Goa, Indore. Add more in `CITIES`.
+
+Refresh after a new Overture release (monthly):
+```bash
+python3 -m venv .venv && .venv/bin/pip install overturemaps duckdb certifi
+.venv/bin/python tools/build_tiles.py
+```
+Data licences: CDLA-Permissive-2.0, Apache-2.0 or CC0, per record.
 
 ## Run locally
 ```bash
@@ -49,8 +60,9 @@ Diet comes from everyone's prefs. Veg, Jain, Vegan and Eggetarian all count as "
 - **A mix:** only cuisines with both veg and non-veg options are shown, and only places serving both. Pure-veg places (including Udupi / "Sagar" / "Bhavan" names) and meat-only places are left out.
 - **Everyone non-veg:** no filter.
 
-## Google Places (optional, for photos, ratings and reviews)
-Put a browser key in `config.js` as `googleMapsKey`. Leave it empty to use free OpenStreetMap data.
+## Google (optional)
+- `googleMapsKey` with only **Maps Embed API** enabled (free, unlimited) gives the official map with Google's place card and rating.
+- Setting `useGooglePlaces: true` as well (and enabling **Places API (New)**) switches restaurant search to paid Google Places, which adds photos, ratings and reviews. Billing is required.
 1. In Google Cloud Console, use the same project as Firebase (`khao-10c77`) and turn on **billing**. Google gives a free monthly allowance per API.
 2. Enable **Places API (New)** and **Maps Embed API**.
 3. Go to **Credentials → Create credentials → API key**, then restrict it:

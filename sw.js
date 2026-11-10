@@ -1,4 +1,4 @@
-const VERSION = 'khao-v2';
+const VERSION = 'khao-v3';
 const SHELL = ['./', 'index.html', 'styles.css', 'app.js', 'store.js', 'data.js', 'places.js', 'config.js',
   'manifest.webmanifest', 'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png'];
 // Live data must never be served stale from cache.
@@ -26,7 +26,7 @@ self.addEventListener('fetch', e => {
       return res;
     }).catch(() => caches.match(req).then(r => r || caches.match('index.html'))));
   } else {
-    // Fonts, Leaflet, map tiles: stale-while-revalidate.
+    // Fonts and other third-party assets: stale-while-revalidate.
     e.respondWith(caches.open(VERSION).then(async c => {
       const hit = await c.match(req);
       const net = fetch(req).then(res => { if (res.ok || res.type === 'opaque') c.put(req, res.clone()); return res; }).catch(() => hit);
