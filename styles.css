@@ -345,3 +345,23 @@ textarea { font-size: 15px; resize: none; }
 .reveal .podium { margin-top: 10px; }
 .reveal-chips { margin-top: 10px; }
 .reveal-chips .chip { cursor: default; }
+
+/* ---------- Google photos, reviews, diet note */
+.diet-note { font: 700 11px/1.4 var(--mono); letter-spacing: .06em; text-transform: uppercase; color: var(--ink-2); background: var(--sunk); border-radius: 12px; padding: 10px 12px; margin: 0 0 14px; }
+.r-visual.has-photo, .r-mini.has-photo, .w-photo { background-color: var(--tone); background-size: cover; background-position: center; }
+.r-visual.has-photo::before { content: ''; position: absolute; inset: 0; background: linear-gradient(to bottom, rgba(0,0,0,.35), transparent 30%, transparent 75%, rgba(0,0,0,.35)); }
+.r-visual.has-photo .eyebrow { color: #fff; z-index: 1; }
+.r-visual .info { z-index: 2; }
+.photo-credit { position: absolute; left: 14px; bottom: 10px; z-index: 1; font: 500 10px var(--mono); color: #fff; text-shadow: 0 1px 4px rgba(0,0,0,.6); max-width: 80%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.w-photo { position: relative; width: 100%; aspect-ratio: 16 / 10; border-radius: 20px; margin: 16px 0 4px; overflow: hidden; }
+.map iframe { width: 100%; height: 100%; border: 0; display: block; }
+.gallery { display: flex; gap: 8px; overflow-x: auto; padding: 12px 20px 0; scroll-snap-type: x mandatory; scrollbar-width: none; }
+.gallery::-webkit-scrollbar { display: none; }
+.gallery figure { flex: 0 0 72%; scroll-snap-align: start; }
+.gallery img { width: 100%; aspect-ratio: 4 / 3; object-fit: cover; border-radius: 16px; display: block; background: var(--sunk); }
+.gallery figcaption { font: 500 10px var(--mono); color: var(--muted); margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gallery figcaption a { color: inherit; }
+.stats { grid-template-columns: repeat(auto-fit, minmax(96px, 1fr)); }
+.g-reviews li p { display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
+.g-reviews small { color: var(--muted); font-size: 12px; }
+.g-reviews a { color: inherit; text-decoration: none; }

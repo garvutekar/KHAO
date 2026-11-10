@@ -1,8 +1,9 @@
 import { CUISINES, CUISINE_BY_ID, BUDGETS, DIETS, SPICE, ALLERGIES, AVATAR_TONES, BOT_NAMES } from './data.js';
 import { createStore } from './store.js';
-import { geocode, reverseGeocode, findRestaurants } from './places.js';
+import { geocode, reverseGeocode, findRestaurants, findGoogle, googleLookup, photoUrl } from './places.js';
 
 const store = createStore(window.KHAO_CONFIG || {});
+const GKEY = (window.KHAO_CONFIG || {}).googleMapsKey || '';
 const STAGES = ['lobby', 'dates', 'prefs', 'place', 'cuisines', 'restaurants', 'results'];
 const GATED = ['dates', 'prefs', 'place', 'cuisines', 'restaurants'];
 const LABEL = { lobby: 'Squad', dates: 'Dates', prefs: 'Prefs', place: 'Spot + ₹', cuisines: 'Cuisines', restaurants: 'Places', results: 'The match' };
@@ -21,6 +22,8 @@ let sheetRid = null;
 const advanced = new Set();
 const botTimers = new Set();
 let fetching = false;
+const placeCache = {}; // Google place details, kept in memory only (never stored in Firebase)
+let hydrating = false;
 
 // ---------- identity (per tab in local mode so tabs act as different people)
 const idStore = () => store.mode === 'local' ? sessionStorage : localStorage;
@@ -85,11 +88,15 @@ function onState(s) {
   if (sheetRid) renderSheetReviews();
   const done = GATED.includes(s.stage) && !!s.done?.[s.stage]?.[me];
   let key = s.stage + (done ? ':wait' : '') + (done && allDone() ? ':all' : '');
+  const ready = !!s.restaurants && !needsHydrate();
+  if (s.restaurants && !ready) hydrate();
   if (s.stage === 'restaurants' && !done) {
-    key += s.restaurants ? ':deck' : ':load';
+    key += ready ? ':deck' : ':load';
     if (!s.restaurants) ensureRestaurants();
   }
-  const factory = done ? viewWaiting : s.stage === 'restaurants' && !s.restaurants ? viewScouting : VIEWS[s.stage];
+  if (s.stage === 'results') key += ready ? '' : ':load';
+  const loading = !done && (s.stage === 'restaurants' || s.stage === 'results') && !ready;
+  const factory = done ? viewWaiting : loading ? viewScouting : VIEWS[s.stage];
   show(key, factory);
 }
 
@@ -159,6 +166,20 @@ function bestDates() {
   return { max, dates: Object.keys(tally).filter(d => tally[d] === max).sort() };
 }
 
+// Squad diet mode, from everyone's prefs. Egg, Jain and vegan count as veg (no meat).
+const VEG_SIDE = new Set(['veg', 'jain', 'vegan', 'egg']);
+function dietMode() {
+  const diets = Object.keys(G.members || {}).map(u => G.prefs?.[u]?.diet).filter(Boolean);
+  const veg = diets.filter(d => VEG_SIDE.has(d)).length;
+  return !diets.length ? 'any' : veg === diets.length ? 'veg' : veg ? 'mixed' : 'any';
+}
+const cuisineOk = (c, mode = dietMode()) => mode === 'veg' ? c.veg : mode === 'mixed' ? c.veg && c.nonveg : true;
+const allowedCuisines = () => CUISINES.filter(c => cuisineOk(c));
+const DIET_NOTE = {
+  veg: 'All-veg squad — meat-only cuisines are hidden.',
+  mixed: 'Veg + non-veg squad — only cuisines and places that serve both.',
+};
+
 function groupDiet() {
   const diets = Object.values(G.prefs || {}).map(p => p.diet);
   return { veg: diets.some(d => d === 'veg' || d === 'jain' || d === 'vegan'), jain: diets.includes('jain'), vegan: diets.includes('vegan'), diets };
@@ -172,6 +193,7 @@ function topCuisines() {
   }
   const n = Object.keys(G.members || {}).length;
   return CUISINES.map((c, i) => ({ c, i, score: score[c.id] || 0, likes: likes[c.id] || 0 }))
+    .filter(x => cuisineOk(x.c))
     .sort((a, b) => b.likes - a.likes || b.score - a.score || a.i - b.i)
     .slice(0, 3).map(x => ({ ...x, pct: Math.round(100 * x.likes / Math.max(1, n)) }));
 }
@@ -188,9 +210,30 @@ function meetingPoint() {
   return { lat: +lat.toFixed(5), lon: +lon.toFixed(5), budget, label };
 }
 
+// The squad's restaurant list merged with Google details loaded on this phone.
+const placeList = () => (G.restaurants || []).map(ref => ({ ...ref, ...(placeCache[ref.id] || {}) }));
+const needsHydrate = () => !!GKEY && (G.restaurants || []).some(ref => ref.g && !placeCache[ref.id]);
+async function hydrate() {
+  if (hydrating || !GKEY || !G.meet) return;
+  hydrating = true;
+  try {
+    const refs = G.restaurants.filter(r => r.g && !placeCache[r.id]);
+    const got = await googleLookup({ refs, origin: G.meet, key: GKEY });
+    got.forEach(r => { placeCache[r.id] = r; });
+    // Anything Google can't return any more still gets a card, so the deck never stalls.
+    refs.forEach(r => { placeCache[r.id] ||= { name: 'Unavailable spot', cuisineLabel: CUISINE_BY_ID[r.cuisineId].name, budget: 2, diet: {} }; });
+  } catch (e) {
+    console.warn('Google details failed', e);
+    toast('Couldn’t load place details');
+  } finally {
+    hydrating = false;
+    if (G) onState(G);
+  }
+}
+
 function restScores() {
   const n = Object.keys(G.members || {}).length;
-  return (G.restaurants || []).map(r => {
+  return placeList().map(r => {
     let likes = 0, supers = 0, score = 0;
     const fans = [];
     for (const [u, votes] of Object.entries(G.restVotes || {})) {
@@ -223,8 +266,15 @@ function dietBadges(r) {
 
 function budgetTag(r) {
   const fits = !G?.meet || r.budget <= G.meet.budget;
-  return `<span class="badge ${fits ? 'ok' : 'warn'}">${'₹'.repeat(r.budget)} <small>est.</small></span>`;
+  const label = r.priceText || '₹'.repeat(r.budget);
+  return `<span class="badge ${fits ? 'ok' : 'warn'}">${label}${r.budgetKnown ? '' : ' <small>est.</small>'}</span>`;
 }
+
+const fmtCount = n => n >= 1000 ? (n / 1000).toFixed(n >= 10000 ? 0 : 1) + 'k' : String(n);
+function ratingTag(r) {
+  return r.rating ? `<span class="badge">★ ${r.rating.toFixed(1)} · ${fmtCount(r.ratingCount)}</span>` : '';
+}
+const photoBg = (r, w) => r.photos?.length && GKEY ? `background-image:url('${photoUrl(r.photos[0].name, GKEY, w)}');` : '';
 
 function seededShuffle(arr, seed) {
   let h = 0;
@@ -562,19 +612,21 @@ function viewPlace() {
 }
 
 function viewCuisines() {
-  const items = seededShuffle(CUISINES, gid);
+  const items = seededShuffle(allowedCuisines(), gid);
+  const note = DIET_NOTE[dietMode()];
   const mine = G.cuisineVotes?.[me] || {};
   const start = Math.max(0, items.findIndex(c => mine[c.id] === undefined));
   let deck;
   return {
     html: `
     <div class="deck-head"><p class="eyebrow"><b>05</b> — Swipe cuisines</p><span class="deck-count"></span></div>
+    ${note ? `<p class="diet-note">${note}</p>` : ''}
     <div class="deck"></div>
     ${deckControls}`,
     init(root) {
       deck = mountDeck(root, items, items.every(c => mine[c.id] !== undefined) ? items.length : start, (c, k) => `
         <div class="cuisine" style="--tone:${c.tone}">
-          <div class="c-top"><span class="eyebrow">Drop ${pad(k + 1)}</span><span class="tagline-sm">${c.veg ? 'Veg-friendly' : 'Meat-forward'} · ${'🌶️'.repeat(c.spice) || 'No heat'}</span></div>
+          <div class="c-top"><span class="eyebrow">Drop ${pad(k + 1)}</span><span class="tagline-sm">${!c.nonveg ? 'Pure veg' : !c.veg ? 'Meat-forward' : dietMode() === 'veg' ? 'Veg options' : 'Veg + non-veg'} · ${'🌶️'.repeat(c.spice) || 'No heat'}</span></div>
           <div class="c-emoji">${c.emoji}</div>
           <div class="c-body"><h3>${c.name}</h3><p>${c.tag}</p></div>
         </div>`,
@@ -592,7 +644,7 @@ function viewScouting() {
     html: `
     ${stageHead(6, 'The top 3', 'Cuisines that made the cut')}
     <ol class="podium">${top.map((t, i) => `<li style="--tone:${t.c.tone}"><b>${pad(i + 1)}</b><span class="p-emoji">${t.c.emoji}</span><span class="p-name">${t.c.name}</span><em>${t.pct}%</em></li>`).join('')}</ol>
-    <div class="center-msg compact"><div class="spinner"></div><p class="eyebrow">Scouting spots near ${esc(meet?.label || 'you')}</p><p class="fine">Pulling real restaurants from OpenStreetMap…</p></div>`,
+    <div class="center-msg compact"><div class="spinner"></div><p class="eyebrow">Scouting spots near ${esc(meet?.label || 'you')}</p><p class="fine">${GKEY ? 'Pulling real restaurants, photos and reviews from Google…' : 'Pulling real restaurants from OpenStreetMap…'}</p></div>`,
   };
 }
 
@@ -611,24 +663,34 @@ async function fetchRestaurants() {
   fetching = true;
   try {
     const meet = meetingPoint() || { lat: 19.076, lon: 72.8777, budget: 2, label: 'Mumbai' };
-    const { list, source } = await findRestaurants({ ...meet, cuisines: topCuisines().map(t => t.c.id) });
-    await set('meet', { ...meet, source });
-    await set('restaurants', list);
+    const args = { ...meet, cuisines: topCuisines().map(t => t.c.id), diet: dietMode() };
+    let res = null;
+    if (GKEY) {
+      try { res = await findGoogle({ ...args, key: GKEY }); } catch (e) { console.warn('Google Places unavailable, using OpenStreetMap', e); }
+    }
+    res ||= await findRestaurants(args);
+    await set('meet', { ...meet, source: res.source });
+    if (res.source === 'google') {
+      res.list.forEach(r => { placeCache[r.id] = r; });
+      await set('restaurants', res.list.map(r => ({ id: r.id, g: true, cuisineId: r.cuisineId, lat: r.lat, lon: r.lon, distKm: r.distKm })));
+    } else {
+      await set('restaurants', res.list);
+    }
   } finally { fetching = false; }
 }
 
 function restCard(r, k) {
   const c = CUISINE_BY_ID[r.cuisineId];
   return `<div class="rest">
-    <div class="r-visual" style="--tone:${c.tone}">
+    <div class="r-visual ${photoBg(r, 800) ? 'has-photo' : ''}" style="--tone:${c.tone};${photoBg(r, 800)}">
       <span class="eyebrow">Spot ${pad(k + 1)}${r.demo ? ' · Demo data' : ''}</span>
-      <span class="r-emoji">${c.emoji}</span>
+      ${photoBg(r, 800) ? `<span class="photo-credit">${r.photos[0].by ? `Photo: ${esc(r.photos[0].by)} · ` : ''}Google</span>` : `<span class="r-emoji">${c.emoji}</span>`}
       <button class="info" data-info="${r.id}" aria-label="Details">i</button>
     </div>
     <div class="r-body">
       <p class="eyebrow">${esc(r.cuisineLabel)}</p>
       <h3>${esc(r.name)}</h3>
-      <div class="badges">${budgetTag(r)}<span class="badge">${r.distKm} km</span>${dietBadges(r)}</div>
+      <div class="badges">${ratingTag(r)}${budgetTag(r)}<span class="badge">${r.distKm} km</span>${dietBadges(r)}</div>
       ${r.addr ? `<p class="fine">${esc(r.addr)}</p>` : ''}
       ${r.hours ? `<p class="fine">🕒 ${esc(r.hours)}</p>` : ''}
     </div>
@@ -636,7 +698,7 @@ function restCard(r, k) {
 }
 
 function viewRestaurants() {
-  const items = G.restaurants || [];
+  const items = placeList();
   const mine = G.restVotes?.[me] || {};
   const start = items.findIndex(r => mine[r.id] === undefined);
   const top = topCuisines();
@@ -646,6 +708,7 @@ function viewRestaurants() {
     <div id="intro" ${intro ? '' : 'hidden'}>
       ${stageHead(6, 'The top 3', 'Cuisines that made the cut', `${items.length} spots near ${esc(G.meet?.label || 'you')}. Swipe like you mean it.`)}
       <ol class="podium">${top.map((t, i) => `<li style="--tone:${t.c.tone}"><b>${pad(i + 1)}</b><span class="p-emoji">${t.c.emoji}</span><span class="p-name">${t.c.name}</span><em>${t.pct}%</em></li>`).join('')}</ol>
+      ${DIET_NOTE[dietMode()] ? `<p class="diet-note">${DIET_NOTE[dietMode()]}</p>` : ''}
       ${G.meet?.source === 'demo' ? `<p class="mode-note">Couldn’t find enough mapped spots here, so these are <b>demo places</b>. Try a busier area next time.</p>` : ''}
       <div class="sticky-cta"><button class="btn primary big" id="begin">Start swiping places <i>→</i></button></div>
     </div>
@@ -743,21 +806,22 @@ function viewResults() {
     const rs = reviewStats(x.r.id);
     return `<li><button class="row" data-info="${x.r.id}">
       <b class="rank">${pad(i + 1)}</b>
-      <span class="r-mini" style="--tone:${CUISINE_BY_ID[x.r.cuisineId].tone}">${CUISINE_BY_ID[x.r.cuisineId].emoji}</span>
-      <span class="row-main"><strong>${esc(x.r.name)}</strong><small>${esc(x.r.cuisineLabel)} · ${x.r.distKm} km · ${'₹'.repeat(x.r.budget)}${rs.list.length ? ` · ★ ${rs.avg.toFixed(1)}` : ''}</small></span>
+      <span class="r-mini ${photoBg(x.r, 800) ? 'has-photo' : ''}" style="--tone:${CUISINE_BY_ID[x.r.cuisineId].tone};${photoBg(x.r, 800)}">${photoBg(x.r, 800) ? '' : CUISINE_BY_ID[x.r.cuisineId].emoji}</span>
+      <span class="row-main"><strong>${esc(x.r.name)}</strong><small>${esc(x.r.cuisineLabel)} · ${x.r.distKm} km · ${x.r.priceText || '₹'.repeat(x.r.budget)}${x.r.rating ? ` · ★ ${x.r.rating.toFixed(1)}` : rs.list.length ? ` · ★ ${rs.avg.toFixed(1)}` : ''}</small></span>
       <span class="pct">${x.pct}%</span>
     </button></li>`;
   }).join('');
   const w = ranked[0];
-  const plan = w ? `KHAO says: ${w.r.name} (${w.r.cuisineLabel}) on ${dates[0] ? fmtDate(dates[0]) : 'TBD'} 🍽️ https://www.openstreetmap.org/${w.r.osm || ''}` : '';
+  const link = w ? w.r.mapsUri || (w.r.osm ? `https://www.openstreetmap.org/${w.r.osm}` : `https://www.google.com/maps/search/?api=1&query=${w.r.lat},${w.r.lon}`) : '';
+  const plan = w ? `KHAO says: ${w.r.name} (${w.r.cuisineLabel}) on ${dates[0] ? fmtDate(dates[0]) : 'TBD'} 🍽️ ${link}` : '';
   return {
     html: w ? `
     <section class="winner">
       <p class="eyebrow">It’s a match — ${w.pct}% of the squad</p>
-      <span class="w-emoji">${CUISINE_BY_ID[w.r.cuisineId].emoji}</span>
+      ${photoBg(w.r, 800) ? `<div class="w-photo" style="${photoBg(w.r, 800)}"><span class="photo-credit">${w.r.photos[0].by ? `Photo: ${esc(w.r.photos[0].by)} · ` : ''}Google</span></div>` : `<span class="w-emoji">${CUISINE_BY_ID[w.r.cuisineId].emoji}</span>`}
       <h1 class="mega small">${esc(w.r.name)}</h1>
       <p class="w-meta">${esc(w.r.cuisineLabel)} · ${w.r.distKm} km from midpoint</p>
-      <div class="badges center">${budgetTag(w.r)}${dietBadges(w.r)}${w.supers ? `<span class="badge ok">★ ${w.supers} obsessed</span>` : ''}</div>
+      <div class="badges center">${ratingTag(w.r)}${budgetTag(w.r)}${dietBadges(w.r)}${w.supers ? `<span class="badge ok">★ ${w.supers} obsessed</span>` : ''}</div>
       <div class="fans">${w.fans.map(u => G.members[u] ? avatar(u, G.members[u]) : '').join('')}</div>
       <div class="btn-row"><button class="btn primary" data-info="${w.r.id}">Map &amp; reviews</button>
       <a class="btn ghost" target="_blank" rel="noopener" href="https://wa.me/?text=${encodeURIComponent(plan)}">Share plan</a></div>
@@ -795,38 +859,54 @@ function loadLeaflet() {
 }
 
 function openSheet(id) {
-  const r = (G.restaurants || []).find(x => x.id === id);
+  const r = placeList().find(x => x.id === id);
   if (!r) return;
   sheetRid = id;
   const c = CUISINE_BY_ID[r.cuisineId];
   const score = restScores().find(x => x.r.id === id);
   const q = encodeURIComponent(`${r.name} ${r.addr || G.meet?.label || ''}`);
+  const google = r.g && GKEY;
+  const reviewsUrl = r.mapsUri || `https://www.google.com/maps/search/?api=1&query=${q}`;
   const sheet = $('#sheet');
   sheet.innerHTML = `
     <div class="sheet-bg" data-close></div>
     <div class="sheet-panel" role="dialog" aria-label="${esc(r.name)}">
       <button class="sheet-x" data-close aria-label="Close">✕</button>
-      <div class="map" id="map"><span class="r-emoji">${c.emoji}</span></div>
+      <div class="map" id="map">${google
+        ? `<iframe title="Map of ${esc(r.name)}" loading="lazy" referrerpolicy="no-referrer-when-downgrade" allowfullscreen
+             src="https://www.google.com/maps/embed/v1/place?key=${encodeURIComponent(GKEY)}&q=place_id:${encodeURIComponent(r.id)}&zoom=16"></iframe>`
+        : `<span class="r-emoji">${c.emoji}</span>`}</div>
+      ${google && r.photos?.length ? `<div class="gallery">${r.photos.map(ph => `<figure>
+          <img loading="lazy" src="${photoUrl(ph.name, GKEY, 800)}" alt="Photo of ${esc(r.name)}">
+          <figcaption>${ph.by ? `Photo: ${ph.byUri ? `<a target="_blank" rel="noopener" href="${esc(ph.byUri)}">${esc(ph.by)}</a>` : esc(ph.by)}` : 'Photo'} · Google</figcaption>
+        </figure>`).join('')}</div>` : ''}
       <div class="sheet-body">
         <p class="eyebrow">${esc(r.cuisineLabel)}${r.demo ? ' · Demo data' : ''}</p>
         <h2 class="title sm">${esc(r.name)}</h2>
-        <div class="badges">${budgetTag(r)}<span class="badge">${r.distKm} km</span>${dietBadges(r)}${r.delivery ? '<span class="badge">Delivers</span>' : ''}${r.outdoor ? '<span class="badge">Outdoor seating</span>' : ''}</div>
+        <div class="badges">${ratingTag(r)}${budgetTag(r)}<span class="badge">${r.distKm} km</span>${dietBadges(r)}${r.delivery ? '<span class="badge">Delivers</span>' : ''}${r.outdoor ? '<span class="badge">Outdoor seating</span>' : ''}</div>
         <div class="stats">
           <div><b>${score && G.stage === 'results' ? score.pct + '%' : '—'}</b><span>${G.stage === 'results' ? 'Squad match' : 'Match after voting'}</span></div>
+          ${r.rating ? `<div><b>★ ${r.rating.toFixed(1)}</b><span>${fmtCount(r.ratingCount)} Google ratings</span></div>` : ''}
           <div><b id="avgStars">—</b><span>Squad rating</span></div>
-          <div><b>${'₹'.repeat(r.budget)}</b><span>${BUDGETS[r.budget - 1].label}</span></div>
+          <div><b>${'₹'.repeat(r.budget)}</b><span>${r.priceText ? r.priceText + ' per person' : BUDGETS[r.budget - 1].label}</span></div>
         </div>
         <dl class="facts">
           ${r.addr ? `<dt>Address</dt><dd>${esc(r.addr)}</dd>` : ''}
-          ${r.hours ? `<dt>Hours</dt><dd>${esc(r.hours)}</dd>` : ''}
+          ${r.week?.length ? `<dt>Hours</dt><dd>${r.hours ? `<b>${esc(r.hours)}</b><br>` : ''}${r.week.map(esc).join('<br>')}</dd>` : r.hours ? `<dt>Hours</dt><dd>${esc(r.hours)}</dd>` : ''}
           ${r.phone ? `<dt>Phone</dt><dd><a href="tel:${esc(r.phone)}">${esc(r.phone)}</a></dd>` : ''}
           ${r.website ? `<dt>Web</dt><dd><a target="_blank" rel="noopener" href="${esc(r.website)}">${esc(r.website.replace(/^https?:\/\//, ''))}</a></dd>` : ''}
-          <dt>Diet</dt><dd>${dietBadges(r) || 'Not listed on the map — call ahead if strict.'}</dd>
+          <dt>Diet</dt><dd>${dietBadges(r) || 'Not listed — call ahead if strict.'}</dd>
         </dl>
         <div class="btn-row">
-          <a class="btn primary" target="_blank" rel="noopener" href="https://www.google.com/maps/dir/?api=1&destination=${r.lat},${r.lon}">Directions</a>
-          <a class="btn ghost" target="_blank" rel="noopener" href="https://www.google.com/maps/search/?api=1&query=${q}">Public reviews ↗</a>
+          <a class="btn primary" target="_blank" rel="noopener" href="https://www.google.com/maps/dir/?api=1&destination=${r.lat},${r.lon}${r.g ? `&destination_place_id=${encodeURIComponent(r.id)}` : ''}">Directions</a>
+          <a class="btn ghost" target="_blank" rel="noopener" href="${esc(reviewsUrl)}">${r.g ? 'Open in Google Maps ↗' : 'Public reviews ↗'}</a>
         </div>
+        ${r.gReviews?.length ? `<section class="reviews g-reviews">
+          <div class="count-row"><span class="eyebrow">Google reviews</span></div>
+          <ul>${r.gReviews.map(rv => `<li><div><b>${rv.authorUri ? `<a target="_blank" rel="noopener" href="${esc(rv.authorUri)}">${esc(rv.author)}</a>` : esc(rv.author)}</b>
+            <span class="st">${'★'.repeat(Math.round(rv.rating))}${'☆'.repeat(5 - Math.round(rv.rating))}</span> <small>${esc(rv.when)}</small>
+            ${rv.text ? `<p>${esc(rv.text)}</p>` : ''}</div></li>`).join('')}</ul>
+        </section>` : ''}
         <section class="reviews">
           <div class="count-row"><span class="eyebrow">Squad reviews</span></div>
           <ul id="revList"></ul>
@@ -836,7 +916,7 @@ function openSheet(id) {
             <button class="btn small">Post review</button>
           </form>
         </section>
-        <p class="fine">Place data © OpenStreetMap contributors. Squad ratings come only from people in this plan.</p>
+        <p class="fine">${r.g ? 'Place info, photos and reviews from Google Maps.' : 'Place data © OpenStreetMap contributors.'} Squad ratings come only from people in this plan.</p>
       </div>
     </div>`;
   sheet.hidden = false;
@@ -857,6 +937,7 @@ function openSheet(id) {
   };
   renderSheetReviews();
 
+  if (google) return;
   loadLeaflet().then(L => {
     if (sheetRid !== id) return;
     const el = $('#map');
@@ -916,7 +997,7 @@ async function botAct(uid, st) {
     const h = G.place[me];
     await set(`place/${uid}`, { lat: +(h.lat + (Math.random() - .5) * .03).toFixed(5), lon: +(h.lon + (Math.random() - .5) * .03).toFixed(5), label: `Near ${h.label.split(',')[0]}`, budget: 1 + Math.floor(Math.random() * 3) });
   } else if (st === 'cuisines') {
-    await set(`cuisineVotes/${uid}`, Object.fromEntries(CUISINES.map(c => [c.id, pick(.4)])));
+    await set(`cuisineVotes/${uid}`, Object.fromEntries(allowedCuisines().map(c => [c.id, pick(.4)])));
   } else if (st === 'restaurants') {
     await set(`restVotes/${uid}`, Object.fromEntries(G.restaurants.map(r => [r.id, pick(.5, .12)])));
   }

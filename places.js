@@ -1,5 +1,6 @@
-// Free place data: OpenStreetMap via Nominatim (search) and Overpass (restaurants). No keys, no billing.
-// Please keep it polite: Nominatim allows ~1 request/second, so search input is debounced in the UI.
+// Place data. Google Places (New) when a key is configured — photos, ratings, reviews, price levels.
+// Otherwise free OpenStreetMap: Nominatim (area search), Overpass + Photon (restaurants).
+// Nominatim allows ~1 request/second, so search input is debounced in the UI.
 import { CUISINES, CUISINE_BY_ID } from './data.js';
 
 const OVERPASS = [
@@ -77,6 +78,18 @@ async function photon(def, origin) {
     });
 }
 
+// Squad diet rules. 'veg': everyone is veg/jain/vegan/egg → drop places known to have no veg food.
+// 'mixed': veg + non-veg eaters → only places serving both (no pure-veg, no meat-only).
+// Names that almost always mean a pure-veg kitchen in India (Udupi darshinis, "Sagar"s, "Bhavan"s).
+const PURE_VEG_NAME = /pure\s*veg|\bveg(etarian)?\s+(only|restaurant)\b|udupi|sagar\b|bhavan\b|bhawan\b|vaishnav|jain\b/i;
+
+export function dietOk(r, mode) {
+  const v = r.diet?.veg;
+  if (mode === 'veg') return v !== 'no';
+  if (mode === 'mixed') return v !== 'no' && v !== 'only';
+  return true;
+}
+
 const PREMIUM = new Set(['japanese', 'continental', 'korean', 'coastal']);
 function estimateBudget(amenity, cuisineId, tags) {
   let b = { fast_food: 1, food_court: 1, ice_cream: 1, cafe: 2, restaurant: 2 }[amenity] || 2;
@@ -89,6 +102,7 @@ function normalize(el, def, origin) {
   const t = el.tags || {};
   const lat = el.lat ?? el.center?.lat, lon = el.lon ?? el.center?.lon;
   const yn = v => (v === 'yes' || v === 'only' || v === 'no') ? v : '';
+  const veg = yn(t['diet:vegetarian']) || (PURE_VEG_NAME.test(t.name || '') ? 'only' : '');
   return {
     id: el.type[0] + el.id,
     osm: `${el.type}/${el.id}`,
@@ -99,7 +113,7 @@ function normalize(el, def, origin) {
     lat, lon,
     distKm: +distKm(origin, { lat, lon }).toFixed(1),
     budget: estimateBudget(t.amenity, def.id, t),
-    diet: { veg: yn(t['diet:vegetarian']), vegan: yn(t['diet:vegan']), jain: yn(t['diet:jain']), halal: yn(t['diet:halal']) },
+    diet: { veg, vegan: yn(t['diet:vegan']), jain: yn(t['diet:jain']), halal: yn(t['diet:halal']) },
     addr: [t['addr:housenumber'], t['addr:street'], t['addr:suburb'] || t['addr:neighbourhood'], t['addr:city']].filter(Boolean).join(', '),
     hours: t.opening_hours || '',
     phone: t.phone || t['contact:phone'] || '',
@@ -124,7 +138,7 @@ function demoPlaces(defs, origin) {
 }
 
 // Returns up to 6 places per cuisine, interleaved so the deck alternates cuisines.
-export async function findRestaurants({ lat, lon, cuisines }) {
+export async function findRestaurants({ lat, lon, cuisines, diet = 'any' }) {
   const origin = { lat, lon };
   const defs = cuisines.map(id => CUISINE_BY_ID[id]).filter(Boolean);
   const regexes = defs.map(d => new RegExp(d.osm, 'i'));
@@ -159,6 +173,7 @@ export async function findRestaurants({ lat, lon, cuisines }) {
     for (const id in byCuisine) byCuisine[id] = byCuisine[id].filter(r => r.distKm <= 12);
   }
   for (const id in byCuisine) {
+    byCuisine[id] = byCuisine[id].filter(r => dietOk(r, diet));
     byCuisine[id].sort((a, b) => (b.distKm < 1.5 ? 1 : 0) - (a.distKm < 1.5 ? 1 : 0) || richness(b) - richness(a) || a.distKm - b.distKm);
   }
   let lists = defs.map(d => (byCuisine[d.id] || []).slice(0, 6));
@@ -170,4 +185,111 @@ export async function findRestaurants({ lat, lon, cuisines }) {
   const out = [];
   for (let i = 0; i < 6; i++) lists.forEach(l => l[i] && out.push(l[i]));
   return { source, list: out };
+}
+
+// ---------- Google Places (New)
+// Google's terms don't allow storing Places content, so the squad only shares place IDs
+// (plus coordinates); every phone loads names, photos and reviews from Google itself.
+const G_API = 'https://places.googleapis.com/v1';
+const G_FIELDS = ['id', 'displayName', 'location', 'rating', 'userRatingCount', 'priceLevel', 'priceRange',
+  'shortFormattedAddress', 'photos', 'servesVegetarianFood', 'primaryTypeDisplayName', 'types', 'googleMapsUri',
+  'regularOpeningHours.weekdayDescriptions', 'currentOpeningHours.openNow', 'nationalPhoneNumber', 'websiteUri', 'reviews'];
+const PRICE = { PRICE_LEVEL_FREE: 1, PRICE_LEVEL_INEXPENSIVE: 1, PRICE_LEVEL_MODERATE: 2, PRICE_LEVEL_EXPENSIVE: 3, PRICE_LEVEL_VERY_EXPENSIVE: 4 };
+
+export const photoUrl = (name, key, w = 600) => `${G_API}/${name}/media?maxWidthPx=${w}&key=${encodeURIComponent(key)}`;
+
+function gHeaders(key, mask) {
+  return { 'Content-Type': 'application/json', 'X-Goog-Api-Key': key, 'X-Goog-FieldMask': mask };
+}
+
+async function googleSearch(def, origin, key, radius) {
+  const circle = { center: { latitude: origin.lat, longitude: origin.lon }, radius };
+  const headers = gHeaders(key, G_FIELDS.map(f => 'places.' + f).join(','));
+  const body = def.gtypes
+    ? { includedTypes: def.gtypes, maxResultCount: 20, rankPreference: 'POPULARITY', locationRestriction: { circle }, languageCode: 'en', regionCode: 'IN' }
+    : { textQuery: def.gtext, pageSize: 20, locationBias: { circle }, languageCode: 'en', regionCode: 'IN' };
+  const url = `${G_API}/places:${def.gtypes ? 'searchNearby' : 'searchText'}`;
+  const r = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
+  const j = await r.json();
+  if (!r.ok) throw new Error(j.error?.message || 'Google Places ' + r.status);
+  return j.places || [];
+}
+
+function fromGoogle(p, def, origin) {
+  const lat = p.location.latitude, lon = p.location.longitude;
+  const name = p.displayName?.text || 'Unnamed spot';
+  const types = p.types || [];
+  const pureVeg = types.includes('vegetarian_restaurant') || types.includes('vegan_restaurant') || PURE_VEG_NAME.test(name);
+  const veg = pureVeg ? 'only' : p.servesVegetarianFood === true ? 'yes' : p.servesVegetarianFood === false ? 'no' : '';
+  const inr = m => m?.units ? '₹' + Number(m.units).toLocaleString('en-IN') : '';
+  const open = p.currentOpeningHours?.openNow;
+  return {
+    id: p.id, g: true, name, cuisineId: def.id,
+    cuisineLabel: p.primaryTypeDisplayName?.text || def.name,
+    lat, lon, distKm: +distKm(origin, { lat, lon }).toFixed(1),
+    budget: PRICE[p.priceLevel] || 2, budgetKnown: !!PRICE[p.priceLevel],
+    priceText: p.priceRange ? [inr(p.priceRange.startPrice), inr(p.priceRange.endPrice)].filter(Boolean).join('–') : '',
+    rating: p.rating || 0, ratingCount: p.userRatingCount || 0,
+    photos: (p.photos || []).slice(0, 6).map(ph => ({
+      name: ph.name, by: ph.authorAttributions?.[0]?.displayName || '', byUri: ph.authorAttributions?.[0]?.uri || '',
+    })),
+    gReviews: (p.reviews || []).slice(0, 5).map(rv => ({
+      author: rv.authorAttribution?.displayName || 'Google user', authorUri: rv.authorAttribution?.uri || '',
+      rating: rv.rating || 0, when: rv.relativePublishTimeDescription || '', text: rv.text?.text || rv.originalText?.text || '',
+    })),
+    diet: { veg, vegan: types.includes('vegan_restaurant') ? 'yes' : '', jain: '', halal: '' },
+    addr: p.shortFormattedAddress || '',
+    hours: open === true ? 'Open now' : open === false ? 'Closed now' : '',
+    week: p.regularOpeningHours?.weekdayDescriptions || [],
+    phone: p.nationalPhoneNumber || '', website: p.websiteUri || '', mapsUri: p.googleMapsUri || '',
+  };
+}
+
+// Well-rated, well-reviewed, close by.
+const gScore = r => (r.rating || 3.6) + Math.min(1, Math.log10(1 + r.ratingCount) / 3) - r.distKm * 0.06;
+
+export async function findGoogle({ lat, lon, cuisines, diet = 'any', key }) {
+  const origin = { lat, lon };
+  const defs = cuisines.map(id => CUISINE_BY_ID[id]).filter(Boolean);
+  const seen = new Set();
+  const lists = [];
+  for (const d of defs) {
+    let picked = [];
+    for (const radius of [3000, 7000]) {
+      const places = await googleSearch(d, origin, key, radius);
+      picked = places.map(p => fromGoogle(p, d, origin))
+        .filter(r => r.distKm <= 12 && !seen.has(r.id) && dietOk(r, diet))
+        .sort((a, b) => gScore(b) - gScore(a));
+      if (picked.length >= 4) break;
+    }
+    picked = picked.slice(0, 6);
+    picked.forEach(r => seen.add(r.id));
+    lists.push(picked);
+  }
+  const out = [];
+  for (let i = 0; i < 6; i++) lists.forEach(l => l[i] && out.push(l[i]));
+  if (out.length < 3) throw new Error('Google found too few places');
+  return { source: 'google', list: out };
+}
+
+// Load the places the squad shared. Re-running the same searches (one call per cuisine) is far cheaper
+// than one Place Details call per place; details are only fetched for anything the searches miss.
+export async function googleLookup({ refs, origin, key }) {
+  const want = new Map(refs.map(r => [r.id, r]));
+  const found = new Map();
+  const cuisineIds = [...new Set(refs.map(r => r.cuisineId))];
+  await Promise.all(cuisineIds.map(async cid => {
+    const d = CUISINE_BY_ID[cid];
+    const places = await googleSearch(d, origin, key, 7000).catch(() => []);
+    for (const p of places) {
+      const ref = want.get(p.id);
+      if (ref && ref.cuisineId === cid) found.set(p.id, fromGoogle(p, d, origin));
+    }
+  }));
+  const mask = G_FIELDS.join(',');
+  await Promise.all(refs.filter(r => !found.has(r.id)).map(async ref => {
+    const r = await fetch(`${G_API}/places/${ref.id}?languageCode=en&regionCode=IN`, { headers: gHeaders(key, mask) });
+    if (r.ok) found.set(ref.id, fromGoogle(await r.json(), CUISINE_BY_ID[ref.cuisineId], origin));
+  }));
+  return [...found.values()];
 }

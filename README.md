@@ -18,7 +18,8 @@ Each step waits until everyone is done. The host can skip people who are too slo
 | Need | Service | Cost |
 |---|---|---|
 | Area search / reverse geocode | Nominatim (OpenStreetMap) | Free, about 1 req/s |
-| Restaurants with cuisine + diet tags | Overpass API (OSM), Photon (komoot) as fallback | Free |
+| Restaurants with photos, ratings, reviews | Google Places API (New), when a key is set | Free monthly allowance, then billed |
+| Restaurants (no key) | Overpass API (OSM), Photon (komoot) as fallback | Free |
 | Map | Leaflet + OpenStreetMap tiles | Free with attribution |
 | Real-time group sync | Firebase Realtime Database (REST + SSE, no SDK) | Free Spark plan |
 | Hosting | GitHub Pages / Netlify / Vercel / Cloudflare Pages | Free |
@@ -41,6 +42,23 @@ Open http://localhost:5173. Without config the app runs in **local mode**: group
    Groups are only reachable by their random link ID. For production, add Firebase Auth (anonymous) and tighten these rules.
 3. Copy the database URL into `config.js` as `firebaseUrl`.
 4. Deploy the folder to any static host over HTTPS. The PWA then installs to the home screen.
+
+## Diet rules
+Diet comes from everyone's prefs. Veg, Jain, Vegan and Eggetarian all count as "no meat".
+- **Everyone no-meat:** meat-only cuisines (steak, seafood, sushi, Korean, Bengali) are hidden. Places known to have no veg food are dropped, and pure-veg spots stay in.
+- **A mix:** only cuisines with both veg and non-veg options are shown, and only places serving both. Pure-veg places (including Udupi / "Sagar" / "Bhavan" names) and meat-only places are left out.
+- **Everyone non-veg:** no filter.
+
+## Google Places (optional, for photos, ratings and reviews)
+Put a browser key in `config.js` as `googleMapsKey`. Leave it empty to use free OpenStreetMap data.
+1. In Google Cloud Console, use the same project as Firebase (`khao-10c77`) and turn on **billing**. Google gives a free monthly allowance per API.
+2. Enable **Places API (New)** and **Maps Embed API**.
+3. Go to **Credentials → Create credentials → API key**, then restrict it:
+   - **Application restriction:** Websites, set to `https://garvutekar.github.io/*` and `http://localhost:5174/*`
+   - **API restriction:** Places API (New) and Maps Embed API
+4. Set a **quota or budget alert** so testing can't run up a bill.
+
+How it's used: Nearby Search for cuisines Google has a type for (Chinese, pizza, burgers…), and Text Search for the rest (biryani, chaat, thali, dosa…). Firebase stores **only place IDs and coordinates**, because Google's terms don't allow storing Places content. Each phone loads names, photos and reviews from Google itself.
 
 ## Files
 - `index.html`, `styles.css`: shell and design system (neutral palette, condensed display type, mono labels)
