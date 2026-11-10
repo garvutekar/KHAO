@@ -81,11 +81,10 @@ function onState(s) {
   if (!s) return show('notfound', viewNotFound);
   me = getMe(gid);
   if (!me || !s.members?.[me]) return show(s.stage === 'lobby' ? 'join' : 'locked', s.stage === 'lobby' ? viewJoin : viewLocked);
-  maybeAdvance();
   runBots();
   if (sheetRid) renderSheetReviews();
   const done = GATED.includes(s.stage) && !!s.done?.[s.stage]?.[me];
-  let key = s.stage + (done ? ':wait' : '');
+  let key = s.stage + (done ? ':wait' : '') + (done && allDone() ? ':all' : '');
   if (s.stage === 'restaurants' && !done) {
     key += s.restaurants ? ':deck' : ':load';
     if (!s.restaurants) ensureRestaurants();
@@ -94,12 +93,10 @@ function onState(s) {
   show(key, factory);
 }
 
-function maybeAdvance() {
-  const st = G.stage;
-  if (!GATED.includes(st) || advanced.has(st)) return;
+const allDone = () => {
   const ids = Object.keys(G.members || {});
-  if (ids.length && ids.every(u => G.done?.[st]?.[u])) advance(st);
-}
+  return ids.length > 0 && ids.every(u => G.done?.[G.stage]?.[u]);
+};
 function advance(from) {
   if (G.stage !== from) return;
   advanced.add(from);
@@ -675,12 +672,46 @@ function viewRestaurants() {
   };
 }
 
+function stageReveal(st) {
+  if (st === 'dates') {
+    const { max, dates } = bestDates();
+    return `<p class="eyebrow">The date</p><h3 class="date-big">${dates[0] ? fmtDate(dates[0]) : 'TBD'}</h3>
+      <p class="lede">${max === members().length ? 'Everyone’s free 🎉' : `${max}/${members().length} free — closest we got`}</p>`;
+  }
+  if (st === 'prefs') {
+    const counts = {};
+    for (const p of Object.values(G.prefs || {})) counts[p.diet] = (counts[p.diet] || 0) + 1;
+    return `<p class="eyebrow">Squad diet</p><div class="chips reveal-chips">${DIETS.filter(d => counts[d.id]).map(d => `<span class="chip on">${d.emoji} ${d.label} ×${counts[d.id]}</span>`).join('')}</div>`;
+  }
+  if (st === 'place') {
+    const m = meetingPoint();
+    const b = BUDGETS[(m?.budget || 2) - 1];
+    return `<p class="eyebrow">Meeting point</p><h3 class="date-big">${esc((m?.label || 'TBD').split(',')[0])}</h3><p class="lede">Budget ${b.sym} · ${b.label} per person</p>`;
+  }
+  if (st === 'cuisines') {
+    return `<p class="eyebrow">Top 3 cuisines</p><ol class="podium">${topCuisines().map((t, i) => `<li style="--tone:${t.c.tone}"><b>${pad(i + 1)}</b><span class="p-emoji">${t.c.emoji}</span><span class="p-name">${t.c.name}</span><em>${t.pct}%</em></li>`).join('')}</ol>`;
+  }
+  return `<p class="eyebrow">Votes are in</p><h3 class="date-big">Match ready</h3>`;
+}
+
 function viewWaiting() {
   const st = G.stage;
   const pending = () => members().filter(([u]) => !G.done?.[st]?.[u]).map(([, m]) => m.name);
+  if (allDone()) {
+    return {
+      html: `
+      <div class="center-msg compact"><p class="eyebrow">${LABEL[st]} — everyone’s in</p></div>
+      <div class="panel reveal">${stageReveal(st)}</div>
+      <div class="panel">${memberStatus(st)}</div>
+      <div class="sticky-cta">${isHost()
+        ? `<button class="btn primary big" id="next">${st === 'restaurants' ? 'See the match' : 'Continue'} <i>→</i></button>`
+        : `<p class="waiting-line"><span class="pulse"></span>Waiting for ${esc(memberName(G.host))} to continue</p>`}</div>`,
+      init(root) { $('#next', root)?.addEventListener('click', () => advance(st)); },
+    };
+  }
   const line = () => {
     const p = pending();
-    return p.length ? `Waiting on ${p.slice(0, 3).map(esc).join(', ')}${p.length > 3 ? ` +${p.length - 3}` : ''}` : 'Everyone’s in — moving on';
+    return `Waiting on ${p.slice(0, 3).map(esc).join(', ')}${p.length > 3 ? ` +${p.length - 3}` : ''}`;
   };
   return {
     html: `
@@ -861,13 +892,13 @@ addEventListener('keydown', e => { if (e.key === 'Escape') closeSheet(); });
 function runBots() {
   if (store.mode !== 'local' || !isHost()) return;
   const st = G.stage;
-  if (!GATED.includes(st)) return;
+  // Test friends only answer after you've locked in, one at a time, so you're never rushed.
+  if (!GATED.includes(st) || !G.done?.[st]?.[me]) return;
+  let n = 0;
   for (const [uid, m] of members()) {
     if (!m.bot || G.done?.[st]?.[uid] || botTimers.has(uid + st)) continue;
-    if (st === 'place' && !G.place?.[me]) continue;
-    if (st === 'restaurants' && !G.restaurants) continue;
     botTimers.add(uid + st);
-    setTimeout(() => botAct(uid, st), 1200 + Math.random() * 2600);
+    setTimeout(() => botAct(uid, st), 1500 + n++ * 1500 + Math.random() * 800);
   }
 }
 
