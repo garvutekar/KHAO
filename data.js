@@ -1,11 +1,13 @@
 // `osm` is a POSIX regex matched against OpenStreetMap's `cuisine` tag (used by Overpass and in JS).
 // `q` are name keywords for the Photon fallback search.
 // `veg` / `nonveg`: whether the cuisine has real veg / non-veg options (drives the squad diet rules).
-// `ov` → Overture place categories; `kw` → name keywords (checked first, they're more specific).
+// `ov` → Overture place categories; `kw` → name keywords (checked first, they're more specific);
+// `weak` → broad categories used only to top up a short list.
 // `gtypes` → Google Nearby Search place types; `gtext` → Google Text Search query (for cuisines Google has no type for).
 export const CUISINES = [
   { id: 'northindian', q: ['north indian', 'punjabi', 'dhaba'], name: 'North Indian', emoji: '🍛', tag: 'Butter. Naan. Repeat.', tone: '#E3D3C3', spice: 2, veg: true, nonveg: true,
-    ov: ['north_indian_restaurant', 'punjabi_restaurant', 'pakistani_restaurant', 'indian_restaurant'],
+    ov: ['north_indian_restaurant', 'punjabi_restaurant', 'pakistani_restaurant'],
+    weak: ['indian_restaurant'],
     kw: ['north indian', 'punjabi', 'dhaba', 'tandoor', 'mughlai', 'paratha', 'amritsari', 'chole'],
     gtext: 'north indian restaurant',
     osm: 'north_indian|punjabi|mughlai|awadhi|(^|;)indian($|;)' },
@@ -24,6 +26,11 @@ export const CUISINES = [
     kw: ['chaat', 'pani puri', 'panipuri', 'golgappa', 'pav bhaji', 'vada pav', 'street food', 'bhel', 'kachori'],
     gtext: 'chaat street food',
     osm: 'chaat|street_food|pav_bhaji|vada_pav|snack|momo' },
+  { id: 'maharashtrian', q: ['misal', 'maharashtrian'], name: 'Maharashtrian', emoji: '🫓', tag: 'Misal with extra tarri, please.', tone: '#E3D3C3', spice: 3, veg: true, nonveg: true,
+    ov: ['maharashtrian_restaurant'],
+    kw: ['misal', 'maharashtrian', 'thalipeeth', 'puran poli', 'sabudana', 'kolhapuri', 'marathi', 'mamledar', 'pithla', 'zunka', 'saoji', 'varhadi', 'mejwani', 'aamhi'],
+    gtext: 'maharashtrian restaurant misal',
+    osm: 'maharashtrian|marathi' },
   { id: 'indochinese', q: ['chinese', 'momos'], name: 'Indo-Chinese', emoji: '🥡', tag: 'Chilli paneer, dry. Always.', tone: '#D9D9D4', spice: 3, veg: true, nonveg: true,
     ov: ['chinese_restaurant', 'indo_chinese_restaurant', 'dim_sum_restaurant', 'dumpling_restaurant', 'tibetan_restaurant', 'nepalese_restaurant'],
     kw: ['chinese', 'momo', 'wok', 'noodle', 'szechuan', 'schezwan', 'manchurian'],
@@ -68,7 +75,7 @@ export const CUISINES = [
     ov: ['buffet_restaurant'],
     kw: ['thali', 'gujarati', 'rajasthani', 'marwari', 'rajdhani', 'bhojanalaya'],
     gtext: 'thali restaurant',
-    osm: 'gujarati|rajasthani|thali|marwari|maharashtrian' },
+    osm: 'gujarati|rajasthani|thali|marwari' },
   { id: 'middleeast', q: ['shawarma', 'lebanese', 'kebab'], name: 'Lebanese & Shawarma', emoji: '🧆', tag: 'Hummus is a personality.', tone: '#E3D3C3', spice: 1, veg: true, nonveg: true,
     ov: ['middle_eastern_restaurant', 'lebanese_restaurant', 'arabian_restaurant', 'doner_kebab_restaurant', 'persian_restaurant', 'turkish_restaurant', 'mediterranean_restaurant', 'falafel_restaurant', 'afghan_restaurant'],
     kw: ['shawarma', 'lebanese', 'kebab', 'kabab', 'arabian', 'mandi', 'falafel', 'turkish'],

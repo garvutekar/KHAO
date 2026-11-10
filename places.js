@@ -12,10 +12,27 @@ const NOMINATIM = 'https://nominatim.openstreetmap.org';
 
 const shortLabel = s => s.split(',').map(x => x.trim()).filter(x => !/^\d{6}$/.test(x) && x !== 'India').slice(0, 3).join(', ');
 
+// Districts and states make terrible meeting points ("Thane" the district centre is 40 km from Thane city),
+// so area search keeps cities, towns, neighbourhoods and landmarks only.
+const BROAD = new Set(['country', 'state', 'state_district', 'region', 'county', 'district', 'province']);
+const KIND = {
+  city: 'City', town: 'Town', village: 'Village', hamlet: 'Village', municipality: 'Town',
+  suburb: 'Area', neighbourhood: 'Area', quarter: 'Area', city_district: 'Area', borough: 'Area', residential: 'Area',
+  road: 'Street', railway: 'Station', station: 'Station',
+};
+
 export async function geocode(q) {
-  const r = await fetch(`${NOMINATIM}/search?format=jsonv2&countrycodes=in&limit=6&q=${encodeURIComponent(q)}`, { headers: { 'Accept-Language': 'en' } });
+  const r = await fetch(`${NOMINATIM}/search?format=jsonv2&countrycodes=in&limit=10&addressdetails=1&q=${encodeURIComponent(q)}`, { headers: { 'Accept-Language': 'en' } });
   if (!r.ok) throw new Error('Search failed');
-  return (await r.json()).map(x => ({ label: shortLabel(x.display_name), lat: +x.lat, lon: +x.lon }));
+  const all = await r.json();
+  const precise = all.filter(x => !BROAD.has(x.addresstype) && x.place_rank >= 13);
+  const seen = new Set();
+  return (precise.length ? precise : all).map(x => {
+    const a = x.address || {};
+    const parts = [x.name, a.suburb || a.neighbourhood || a.city_district, a.city || a.town || a.village || a.county, a.state]
+      .filter(Boolean).filter((v, i, arr) => arr.indexOf(v) === i);
+    return { label: parts.slice(0, 3).join(', ') || shortLabel(x.display_name), kind: KIND[x.addresstype] || 'Place', lat: +x.lat, lon: +x.lon };
+  }).filter(p => !seen.has(p.label) && seen.add(p.label)).slice(0, 6);
 }
 
 export async function reverseGeocode(lat, lon) {
@@ -295,7 +312,7 @@ export async function googleLookup({ refs, origin, key }) {
 }
 
 // ---------- Overture Maps places (free, unlimited: pre-built tiles served with the app)
-// Built by tools/build_tiles.py. Each tile is a 0.05° square; records are
+// Built by tools/build_tiles.py. Each tile is a 0.05° square (missing file = no places there); records are
 // [id, name, lat, lon, category, confidence, address, phone, website, social].
 let tileIndex;
 const tileCache = new Map();
@@ -312,10 +329,20 @@ const MEAT_CATS = new Set(['chicken_restaurant', 'chicken_wings_restaurant', 'st
 const CHEAP = new Set(['fast_food_restaurant', 'food_truck_stand', 'street_vendor', 'bakery', 'tea_room', 'smoothie_juice_bar', 'ice_cream_shop', 'food_court', 'sandwich_shop', 'donut_shop']);
 const PRICEY = new Set(['steakhouse', 'japanese_restaurant', 'sushi_restaurant', 'european_restaurant', 'french_restaurant', 'lounge', 'gastropub', 'wine_bar']);
 
+// How sure we are a place serves a cuisine: 3 = name says so ("… Biryani"), 2 = specific category,
+// 1 = broad category ("indian_restaurant"), only used to top up a short list.
 function matchCuisine(name, cat, defs) {
   const n = name.toLowerCase();
-  return defs.find(d => d.kw.some(k => n.includes(k))) || defs.find(d => d.ov.includes(cat));
+  let d = defs.find(d => d.kw.some(k => n.includes(k)));
+  if (d) return [d, 3];
+  d = defs.find(d => d.ov.includes(cat));
+  if (d) return [d, 2];
+  d = defs.find(d => d.weak?.includes(cat));
+  return d ? [d, 1] : [null, 0];
 }
+// You can't take a squad to a delivery-only kitchen.
+const DELIVERY_ONLY = /cloud\s*kitchen|delivery\s*only|no\s*dine|no\s*dining|takeaway\s*only/i;
+const BARISH = /\bbar\b|permit room|\bpub\b|lounge|wine|beer/i;
 
 function fromOverture(rec, def, origin) {
   const [id, rawName, lat, lon, cat, conf, addr, phone, website, social] = rec;
@@ -336,12 +363,13 @@ function fromOverture(rec, def, origin) {
 }
 
 // Higher confidence, an actual web/social presence, and closeness all count.
-const oScore = r => r.conf + (r.website ? .15 : 0) + (r.social ? .15 : 0) + (r.phone ? .1 : 0) - r.distKm * .08;
+const oScore = r => r.strength + r.conf + (r.website ? .15 : 0) + (r.social ? .15 : 0) + (r.phone ? .1 : 0)
+  - r.distKm * .08 - (BARISH.test(r.name) ? .6 : 0);
 
 export async function findOverture({ lat, lon, cuisines, diet = 'any' }) {
   const index = await loadIndex();
   if (!index) throw new Error('No Overture tiles');
-  const T = index.tile, have = new Set(index.tiles);
+  const T = index.tile;
   const origin = { lat, lon };
   const defs = cuisines.map(id => CUISINE_BY_ID[id]).filter(Boolean);
   let byCuisine = {};
@@ -350,21 +378,22 @@ export async function findOverture({ lat, lon, cuisines, diet = 'any' }) {
     const keys = [];
     for (let y = Math.floor((lat - dLat) / T); y <= Math.floor((lat + dLat) / T); y++)
       for (let x = Math.floor((lon - dLon) / T); x <= Math.floor((lon + dLon) / T); x++)
-        if (have.has(`${y}_${x}`)) keys.push(`${y}_${x}`);
-    if (!keys.length) throw new Error('Area not covered by Overture tiles');
+        keys.push(`${y}_${x}`);
     const recs = (await Promise.all(keys.map(loadTile))).flat();
     byCuisine = {};
     const seen = new Set();
     for (const rec of recs) {
-      const def = matchCuisine(rec[1], rec[4], defs);
+      if (DELIVERY_ONLY.test(rec[1])) continue;
+      const [def, strength] = matchCuisine(rec[1], rec[4], defs);
       if (!def) continue;
       const r = fromOverture(rec, def, origin);
+      r.strength = strength;
       const dupe = r.name.toLowerCase().replace(/[^a-z0-9]/g, '');
       if (r.distKm > radius || seen.has(dupe) || !dietOk(r, diet)) continue;
       seen.add(dupe);
       (byCuisine[def.id] ||= []).push(r);
     }
-    if (defs.every(d => (byCuisine[d.id] || []).length >= 4)) break;
+    if (defs.every(d => (byCuisine[d.id] || []).filter(r => r.strength > 1).length >= 4)) break;
   }
   const lists = defs.map(d => (byCuisine[d.id] || []).sort((a, b) => oScore(b) - oScore(a)).slice(0, 6));
   const out = [];

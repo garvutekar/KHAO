@@ -17,9 +17,9 @@ Each step waits until everyone is done. The host can skip people who are too slo
 ## Free stack
 | Need | Service | Cost |
 |---|---|---|
-| Restaurants (14 Indian metros, ~100k places) | **Overture Maps** places, pre-built into `data/tiles/` and served with the app | Free, unlimited |
-| Restaurants (anywhere else) | OpenStreetMap: Overpass, with Photon as backup | Free |
-| Area search | Nominatim (OpenStreetMap) | Free, about 1 req/s |
+| Restaurants: all of India, tier 1 cities to small towns (~280k places) | **Overture Maps** places, pre-built into `data/tiles/` and served with the app | Free, unlimited |
+| Restaurants (if no tiles nearby) | OpenStreetMap: Overpass, with Photon as backup | Free |
+| Area search | Nominatim (OpenStreetMap), with district/state results skipped | Free, about 1 req/s |
 | Restaurant map | Google Maps embed (keyless; or the official Embed API with a key) | Free, unlimited |
 | Group sync | Firebase Realtime Database (REST + SSE, no SDK) | Free Spark plan |
 | Hosting | GitHub Pages | Free |
@@ -27,13 +27,18 @@ Each step waits until everyone is done. The host can skip people who are too slo
 There are no restaurant photos, and ratings come from the squad itself. The **Photos & reviews** button opens the place on Google Maps.
 
 ## Restaurant data: Overture tiles
-`tools/build_tiles.py` downloads [Overture Maps](https://overturemaps.org) places for each city, keeps food spots (no bars, confidence ≥ 0.45, not closed), and writes 0.05° tiles to `data/tiles/`. The app only loads the tiles around the squad's meeting point.
+`tools/build_tiles.py` queries [Overture Maps](https://overturemaps.org) for every food place in India and its neighbours. It keeps food spots (no bars, confidence ≥ 0.45, not closed) and writes 0.05° tiles (about 5 km squares) to `data/tiles/`. The app only loads the tiles around the squad's meeting point; a missing tile means no places there.
 
-Cities: Mumbai, Delhi NCR, Bengaluru, Hyderabad, Chennai, Kolkata, Pune, Ahmedabad, Jaipur, Chandigarh, Lucknow, Kochi, Goa, Indore. Add more in `CITIES`.
+Cuisine matching, strongest first:
+1. The name says it ("… Misal", "… Biryani", "Udupi …")
+2. A specific Overture category (pizza_restaurant, chinese_restaurant…)
+3. The broad "indian_restaurant" category, only to top up a short list
 
-Refresh after a new Overture release (monthly):
+Bars are ranked lower, and delivery-only cloud kitchens are skipped.
+
+Refresh after a new Overture release (monthly, about 1 minute):
 ```bash
-python3 -m venv .venv && .venv/bin/pip install overturemaps duckdb certifi
+python3 -m venv .venv && .venv/bin/pip install duckdb certifi
 .venv/bin/python tools/build_tiles.py
 ```
 Data licences: CDLA-Permissive-2.0, Apache-2.0 or CC0, per record.

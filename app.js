@@ -588,7 +588,7 @@ function viewPlace() {
           res.innerHTML = `<li class="muted">Searching…</li>`;
           try {
             const list = await geocode(v);
-            res.innerHTML = list.length ? list.map((p, i) => `<li><button data-i="${i}">${esc(p.label)}</button></li>`).join('') : `<li class="muted">No matches — try a bigger landmark</li>`;
+            res.innerHTML = list.length ? list.map((p, i) => `<li><button data-i="${i}"><span class="kind">${esc(p.kind || 'Place')}</span>${esc(p.label)}</button></li>`).join('') : `<li class="muted">No matches — try a bigger landmark</li>`;
             $$('button', res).forEach(b => b.onclick = () => choose(list[+b.dataset.i]));
           } catch { res.innerHTML = `<li class="muted">Search is offline right now</li>`; }
         }, 650);

@@ -186,6 +186,7 @@ textarea { font-size: 15px; resize: none; }
 .results { list-style: none; margin: -6px 0 12px; }
 .results li button { width: 100%; text-align: left; padding: 12px 6px; border-bottom: 1px solid var(--line); font-size: 15px; }
 .results li button:hover { background: var(--sunk); }
+.results .kind { display: inline-block; min-width: 54px; margin-right: 8px; font: 700 10px var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
 .muted { color: var(--muted); font-size: 14px; padding: 10px 6px; list-style: none; }
 .picked { font-weight: 600; margin-top: 12px; }
 .picked:empty { display: none; }
