@@ -59,6 +59,10 @@ Open http://localhost:5173. Without config the app runs in **local mode**: group
 3. Copy the database URL into `config.js` as `firebaseUrl`.
 4. Deploy the folder to any static host over HTTPS. The PWA then installs to the home screen.
 
+## Ties
+- **Cuisines:** the top 3 by likes go through, plus every cuisine tied with 3rd place. The restaurant deck stays around 18 cards (fewer spots per cuisine when more cuisines get through).
+- **Restaurants:** a clear #1 on likes, then "Obsessed" count, wins; distance never decides. If the top spots tie on both, everyone gets a **pick-one runoff** and the most picks wins. If the runoff ties too, the host picks. The host can also count the picks so far instead of waiting.
+
 ## Diet rules
 Diet comes from everyone's prefs. Veg, Jain, Vegan and Eggetarian all count as "no meat".
 - **Everyone no-meat:** meat-only cuisines (steak, seafood, sushi, Korean, Bengali) are hidden. Places known to have no veg food are dropped, and pure-veg spots stay in.

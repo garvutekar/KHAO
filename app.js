@@ -96,9 +96,17 @@ function onState(s) {
     key += ready ? ':deck' : ':load';
     if (!s.restaurants) ensureRestaurants();
   }
-  if (s.stage === 'results') key += ready ? '' : ':load';
+  let runoff = false;
+  if (s.stage === 'results') {
+    if (!ready) key += ':load';
+    else {
+      const fp = finalPick();
+      runoff = !fp.winner;
+      key += fp.winner ? ':final' : fp.phase === 'host' ? ':host' : s.runoff?.[me] ? ':picked' : ':runoff';
+    }
+  }
   const loading = !done && (s.stage === 'restaurants' || s.stage === 'results') && !ready;
-  const factory = done ? viewWaiting : loading ? viewScouting : VIEWS[s.stage];
+  const factory = done ? viewWaiting : loading ? viewScouting : runoff ? viewRunoff : VIEWS[s.stage];
   show(key, factory);
 }
 
@@ -187,6 +195,7 @@ function groupDiet() {
   return { veg: diets.some(d => d === 'veg' || d === 'jain' || d === 'vegan'), jain: diets.includes('jain'), vegan: diets.includes('vegan'), diets };
 }
 
+// Top 3 cuisines by likes — plus every cuisine tied with 3rd place, so a tie never silently drops one.
 function topCuisines() {
   const score = {}, likes = {};
   for (const votes of Object.values(G.cuisineVotes || {})) for (const [cid, v] of Object.entries(votes)) {
@@ -194,11 +203,17 @@ function topCuisines() {
     if (v > 0) likes[cid] = (likes[cid] || 0) + 1;
   }
   const n = Object.keys(G.members || {}).length;
-  return CUISINES.map((c, i) => ({ c, i, score: score[c.id] || 0, likes: likes[c.id] || 0 }))
+  const ranked = CUISINES.map((c, i) => ({ c, i, score: score[c.id] || 0, likes: likes[c.id] || 0 }))
     .filter(x => cuisineOk(x.c))
     .sort((a, b) => b.likes - a.likes || b.score - a.score || a.i - b.i)
-    .slice(0, 3).map(x => ({ ...x, pct: Math.round(100 * x.likes / Math.max(1, n)) }));
+    .map(x => ({ ...x, pct: Math.round(100 * x.likes / Math.max(1, n)) }));
+  const top = ranked.slice(0, 3);
+  const cut = top[top.length - 1];
+  if (cut?.likes > 0) top.push(...ranked.slice(3).filter(x => x.likes === cut.likes));
+  return top;
 }
+// Keep the restaurant deck around 18 cards however many cuisines made it through.
+const spotsPerCuisine = n => Math.min(6, Math.max(2, Math.floor(18 / Math.max(1, n))));
 
 function meetingPoint() {
   const pts = Object.values(G.place || {}).filter(p => p && p.lat);
@@ -245,6 +260,27 @@ function restScores() {
     }
     return { r, likes, supers, score, fans, pct: Math.round(100 * likes / Math.max(1, n)) };
   }).sort((a, b) => b.likes - a.likes || b.supers - a.supers || a.r.distKm - b.r.distKm);
+}
+
+// How the plan's winner is decided:
+//  1. a clear #1 on likes, then Obsessed count, wins outright (distance never decides);
+//  2. a tie goes to a squad runoff — everyone picks one of the tied spots, most picks wins;
+//  3. still tied after the runoff → the host picks.
+function finalPick() {
+  const ranked = restScores();
+  const best = ranked[0];
+  const tied = best && best.likes > 0 ? ranked.filter(x => x.likes === best.likes && x.supers === best.supers) : [];
+  if (tied.length < 2) return { winner: best || null, how: 'votes', tied };
+  if (G.final) return { winner: tied.find(x => x.r.id === G.final) || best, how: 'host', tied };
+  const picks = G.runoff || {};
+  const ids = Object.keys(G.members || {});
+  if (!G.runoffClosed && !ids.every(u => picks[u])) return { winner: null, phase: 'vote', tied };
+  const count = {};
+  for (const id of Object.values(picks)) count[id] = (count[id] || 0) + 1;
+  const top = Math.max(0, ...tied.map(x => count[x.r.id] || 0));
+  const leaders = tied.filter(x => (count[x.r.id] || 0) === top);
+  if (leaders.length === 1) return { winner: leaders[0], how: 'runoff', tied, count };
+  return { winner: null, phase: 'host', tied: leaders, count };
 }
 
 function reviewStats(id) {
@@ -644,7 +680,7 @@ function viewScouting() {
   const meet = meetingPoint();
   return {
     html: `
-    ${stageHead(6, 'The top 3', 'Cuisines that made the cut')}
+    ${stageHead(6, `The top ${top.length}`, 'Cuisines that made the cut', top.length > 3 ? 'There was a tie, so every tied cuisine is in.' : '')}
     <ol class="podium">${top.map((t, i) => `<li style="--tone:${t.c.tone}"><b>${pad(i + 1)}</b><span class="p-emoji">${t.c.emoji}</span><span class="p-name">${t.c.name}</span><em>${t.pct}%</em></li>`).join('')}</ol>
     <div class="center-msg compact"><div class="spinner"></div><p class="eyebrow">Scouting spots near ${esc(meet?.label || 'you')}</p><p class="fine">Finding real restaurants near the squad…</p></div>`,
   };
@@ -665,7 +701,8 @@ async function fetchRestaurants() {
   fetching = true;
   try {
     const meet = meetingPoint() || { lat: 19.076, lon: 72.8777, budget: 2, label: 'Mumbai' };
-    const args = { ...meet, cuisines: topCuisines().map(t => t.c.id), diet: dietMode() };
+    const cuisines = topCuisines().map(t => t.c.id);
+    const args = { ...meet, cuisines, diet: dietMode(), per: spotsPerCuisine(cuisines.length) };
     let res = null;
     if (GPLACES) {
       try { res = await findGoogle({ ...args, key: GKEY }); } catch (e) { console.warn('Google Places unavailable', e); }
@@ -711,7 +748,7 @@ function viewRestaurants() {
   return {
     html: `
     <div id="intro" ${intro ? '' : 'hidden'}>
-      ${stageHead(6, 'The top 3', 'Cuisines that made the cut', `${items.length} spots near ${esc(G.meet?.label || 'you')}. Swipe like you mean it.`)}
+      ${stageHead(6, `The top ${top.length}`, 'Cuisines that made the cut', `${top.length > 3 ? 'Tied cuisines all made it. ' : ''}${items.length} spots near ${esc(G.meet?.label || 'you')}. Swipe like you mean it.`)}
       <ol class="podium">${top.map((t, i) => `<li style="--tone:${t.c.tone}"><b>${pad(i + 1)}</b><span class="p-emoji">${t.c.emoji}</span><span class="p-name">${t.c.name}</span><em>${t.pct}%</em></li>`).join('')}</ol>
       ${DIET_NOTE[dietMode()] ? `<p class="diet-note">${DIET_NOTE[dietMode()]}</p>` : ''}
       ${G.meet?.source === 'demo' ? `<p class="mode-note">Couldn’t find enough mapped spots here, so these are <b>demo places</b>. Try a busier area next time.</p>` : ''}
@@ -757,7 +794,8 @@ function stageReveal(st) {
     return `<p class="eyebrow">Meeting point</p><h3 class="date-big">${esc((m?.label || 'TBD').split(',')[0])}</h3><p class="lede">Budget ${b.sym} · ${b.label} per person</p>`;
   }
   if (st === 'cuisines') {
-    return `<p class="eyebrow">Top 3 cuisines</p><ol class="podium">${topCuisines().map((t, i) => `<li style="--tone:${t.c.tone}"><b>${pad(i + 1)}</b><span class="p-emoji">${t.c.emoji}</span><span class="p-name">${t.c.name}</span><em>${t.pct}%</em></li>`).join('')}</ol>`;
+    const top = topCuisines();
+    return `<p class="eyebrow">Top ${top.length} cuisines${top.length > 3 ? ' — tied, so all go through' : ''}</p><ol class="podium">${top.map((t, i) => `<li style="--tone:${t.c.tone}"><b>${pad(i + 1)}</b><span class="p-emoji">${t.c.emoji}</span><span class="p-name">${t.c.name}</span><em>${t.pct}%</em></li>`).join('')}</ol>`;
   }
   return `<p class="eyebrow">Votes are in</p><h3 class="date-big">Match ready</h3>`;
 }
@@ -803,11 +841,64 @@ function viewWaiting() {
   };
 }
 
+// Tie-break: the squad picks one of the tied spots, or the host decides if the runoff ties too.
+function viewRunoff() {
+  const fp = finalPick();
+  const hostTurn = fp.phase === 'host';
+  const mine = G.runoff?.[me];
+  const canPick = hostTurn ? isHost() : !mine;
+  const t0 = fp.tied[0];
+  const pending = () => members().filter(([u]) => !G.runoff?.[u]).map(([, m]) => m.name);
+  const status = () => hostTurn
+    ? (isHost() ? '' : `<p class="waiting-line"><span class="pulse"></span>Waiting for ${esc(memberName(G.host))} to choose</p>`)
+    : mine ? `<p class="waiting-line"><span class="pulse"></span>Waiting on ${pending().slice(0, 3).map(esc).join(', ')}</p>
+      <ul class="roster">${members().map(([u, m]) => `<li class="${G.runoff?.[u] ? 'done' : ''}">${avatar(u, m)}<span>${esc(m.name)}${u === me ? ' <em>(you)</em>' : ''}</span><b>${G.runoff?.[u] ? '✓' : '···'}</b></li>`).join('')}</ul>` : '';
+  return {
+    html: `
+    <div class="center-msg compact">
+      <p class="eyebrow">${fp.tied.length} spots tied · ${t0.pct}% of the squad${t0.supers ? ` · ${t0.supers} obsessed each` : ''}</p>
+      <h2 class="title">${hostTurn ? 'Still tied.<br>Host decides.' : 'It’s a tie.<br>Pick your fave.'}</h2>
+      <p class="lede">${hostTurn
+        ? `The squad split evenly${isHost() ? ' — you make the call.' : '.'}`
+        : mine ? 'Locked in. Waiting for the rest of the squad.' : 'One pick each. Most picks wins and becomes the plan.'}</p>
+    </div>
+    <ul class="runoff">${fp.tied.map(x => {
+      const c = CUISINE_BY_ID[x.r.cuisineId];
+      return `<li class="${mine === x.r.id ? 'on' : ''}">
+        <span class="r-mini ${photoBg(x.r, 800) ? 'has-photo' : ''}" style="--tone:${c.tone};${photoBg(x.r, 800)}">${photoBg(x.r, 800) ? '' : c.emoji}</span>
+        <span class="row-main"><strong>${esc(x.r.name)}</strong><small>${esc(x.r.cuisineLabel)} · ${x.r.distKm} km · ${x.r.priceText || '₹'.repeat(x.r.budget)}${hostTurn && fp.count ? ` · ${fp.count[x.r.id] || 0} pick${fp.count[x.r.id] === 1 ? '' : 's'}` : ''}</small></span>
+        <button class="info" data-info="${x.r.id}" aria-label="Details">i</button>
+        ${canPick ? `<button class="btn small" data-pick="${x.r.id}">Pick</button>` : mine === x.r.id ? '<b class="mine">Your pick</b>' : ''}
+      </li>`;
+    }).join('')}</ul>
+    <div class="panel" id="runoffStatus" ${status() ? '' : 'hidden'}>${status()}</div>
+    ${!hostTurn && isHost() && mine ? `<div class="sticky-cta"><button class="btn ghost" id="closeRunoff">Don’t wait — count the picks so far</button></div>` : ''}`,
+    init(root) {
+      root.addEventListener('click', e => {
+        const info = e.target.closest('[data-info]');
+        if (info) return openSheet(info.dataset.info);
+        const pick = e.target.closest('[data-pick]');
+        if (!pick) return;
+        if (hostTurn) set('final', pick.dataset.pick);
+        else set(`runoff/${me}`, pick.dataset.pick);
+      });
+      $('#closeRunoff', root)?.addEventListener('click', () => set('runoffClosed', true));
+    },
+    update() {
+      const el = $('#runoffStatus');
+      if (el) { el.innerHTML = status(); el.hidden = !status(); }
+    },
+  };
+}
+
 function viewResults() {
+  const fp = finalPick();
   const ranked = restScores();
   const { dates, max } = bestDates();
   const top = topCuisines();
-  const listHTML = () => restScores().map((x, i) => {
+  // The decided winner leads the leaderboard, even when a runoff lifted it above an equal score.
+  const ordered = () => { const all = restScores(); const w = all.find(x => x.r.id === fp.winner?.r.id); return w ? [w, ...all.filter(x => x !== w)] : all; };
+  const listHTML = () => ordered().map((x, i) => {
     const rs = reviewStats(x.r.id);
     return `<li><button class="row" data-info="${x.r.id}">
       <b class="rank">${pad(i + 1)}</b>
@@ -816,13 +907,14 @@ function viewResults() {
       <span class="pct">${x.pct}%</span>
     </button></li>`;
   }).join('');
-  const w = ranked[0];
+  const w = ranked.find(x => x.r.id === fp.winner?.r.id) || ranked[0];
+  const how = { runoff: ' · won the tie-break vote', host: ' · tie broken by the host' }[fp.how] || '';
   const link = w ? w.r.mapsUri || (w.r.osm ? `https://www.openstreetmap.org/${w.r.osm}` : `https://www.google.com/maps/search/?api=1&query=${w.r.lat},${w.r.lon}`) : '';
   const plan = w ? `KHAO says: ${w.r.name} (${w.r.cuisineLabel}) on ${dates[0] ? fmtDate(dates[0]) : 'TBD'} 🍽️ ${link}` : '';
   return {
     html: w ? `
     <section class="winner">
-      <p class="eyebrow">It’s a match — ${w.pct}% of the squad</p>
+      <p class="eyebrow">It’s a match — ${w.pct}% of the squad${how}</p>
       ${photoBg(w.r, 800) ? `<div class="w-photo" style="${photoBg(w.r, 800)}"><span class="photo-credit">${w.r.photos[0].by ? `Photo: ${esc(w.r.photos[0].by)} · ` : ''}Google</span></div>` : `<span class="w-emoji">${CUISINE_BY_ID[w.r.cuisineId].emoji}</span>`}
       <h1 class="mega small">${esc(w.r.name)}</h1>
       <p class="w-meta">${esc(w.r.cuisineLabel)} · ${w.r.distKm} km from midpoint</p>
@@ -958,9 +1050,21 @@ addEventListener('keydown', e => { if (e.key === 'Escape') closeSheet(); });
 function runBots() {
   if (!isHost()) return;
   const st = G.stage;
+  let n = 0;
+  // Tie-break runoff: test friends pick one of the tied spots once you've picked.
+  if (st === 'results' && G.runoff?.[me] && !G.runoffClosed && !needsHydrate()) {
+    const fp = finalPick();
+    if (fp.phase !== 'vote') return;
+    for (const [uid, m] of members()) {
+      if (!m.bot || G.runoff?.[uid] || botTimers.has(uid + 'runoff')) continue;
+      botTimers.add(uid + 'runoff');
+      const choice = fp.tied[Math.floor(Math.random() * fp.tied.length)].r.id;
+      setTimeout(() => set(`runoff/${uid}`, choice), 1500 + n++ * 1500 + Math.random() * 800);
+    }
+    return;
+  }
   // Test friends only answer after you've locked in, one at a time, so you're never rushed.
   if (!GATED.includes(st) || !G.done?.[st]?.[me]) return;
-  let n = 0;
   for (const [uid, m] of members()) {
     if (!m.bot || G.done?.[st]?.[uid] || botTimers.has(uid + st)) continue;
     botTimers.add(uid + st);

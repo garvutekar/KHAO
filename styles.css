@@ -360,3 +360,12 @@ textarea { font-size: 15px; resize: none; }
 .g-reviews li p { display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
 .g-reviews small { color: var(--muted); font-size: 12px; }
 .g-reviews a { color: inherit; text-decoration: none; }
+
+/* ---------- tie-break runoff */
+.runoff { list-style: none; display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; margin: 8px 0 16px; }
+.runoff li { display: flex; align-items: center; gap: 12px; background: var(--surface); border: 1.5px solid var(--line); border-radius: 20px; padding: 12px 14px; box-shadow: var(--shadow); transition: border-color .15s; }
+.runoff li.on { border-color: var(--ink); }
+.runoff .info { position: static; flex: none; width: 34px; height: 34px; font-size: 14px; }
+.runoff .btn.small { flex: none; }
+.runoff .mine { flex: none; font: 700 11px var(--mono); letter-spacing: .06em; text-transform: uppercase; }
+#runoffStatus .roster { margin-top: 6px; }

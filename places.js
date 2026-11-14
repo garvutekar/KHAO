@@ -21,10 +21,28 @@ const KIND = {
   road: 'Street', railway: 'Station', station: 'Station',
 };
 
+// Photon (komoot) as a backup when Nominatim is busy or rate-limiting.
+async function photonGeocode(q) {
+  const j = await getJSON(`https://photon.komoot.io/api/?q=${encodeURIComponent(q)}&limit=10&lang=en&bbox=68,6.5,97.5,35.7`, {}, 10000);
+  const BROAD_P = new Set(['country', 'state', 'county']);
+  const seen = new Set();
+  return j.features.filter(f => !BROAD_P.has(f.properties.type)).map(f => {
+    const p = f.properties;
+    const parts = [p.name, p.district || p.locality, p.city, p.state].filter(Boolean).filter((v, i, arr) => arr.indexOf(v) === i);
+    return { label: parts.slice(0, 3).join(', '), kind: { city: 'City', district: 'Area', locality: 'Area', street: 'Street' }[p.type] || 'Place', lat: f.geometry.coordinates[1], lon: f.geometry.coordinates[0] };
+  }).filter(p => p.label && !seen.has(p.label) && seen.add(p.label)).slice(0, 6);
+}
+
 export async function geocode(q) {
-  const r = await fetch(`${NOMINATIM}/search?format=jsonv2&countrycodes=in&limit=10&addressdetails=1&q=${encodeURIComponent(q)}`, { headers: { 'Accept-Language': 'en' } });
-  if (!r.ok) throw new Error('Search failed');
-  const all = await r.json();
+  let all;
+  try {
+    const r = await fetch(`${NOMINATIM}/search?format=jsonv2&countrycodes=in&limit=10&addressdetails=1&q=${encodeURIComponent(q)}`, { headers: { 'Accept-Language': 'en' } });
+    if (!r.ok) throw new Error('Nominatim ' + r.status);
+    all = await r.json();
+  } catch (e) {
+    console.warn('Area search falling back to Photon', e);
+    return photonGeocode(q);
+  }
   const precise = all.filter(x => !BROAD.has(x.addresstype) && x.place_rank >= 13);
   const seen = new Set();
   return (precise.length ? precise : all).map(x => {
@@ -154,8 +172,8 @@ function demoPlaces(defs, origin) {
   })));
 }
 
-// Returns up to 6 places per cuisine, interleaved so the deck alternates cuisines.
-export async function findRestaurants({ lat, lon, cuisines, diet = 'any' }) {
+// Returns up to `per` places per cuisine, interleaved so the deck alternates cuisines.
+export async function findRestaurants({ lat, lon, cuisines, diet = 'any', per = 6 }) {
   const origin = { lat, lon };
   const defs = cuisines.map(id => CUISINE_BY_ID[id]).filter(Boolean);
   const regexes = defs.map(d => new RegExp(d.osm, 'i'));
@@ -193,14 +211,14 @@ export async function findRestaurants({ lat, lon, cuisines, diet = 'any' }) {
     byCuisine[id] = byCuisine[id].filter(r => dietOk(r, diet));
     byCuisine[id].sort((a, b) => (b.distKm < 1.5 ? 1 : 0) - (a.distKm < 1.5 ? 1 : 0) || richness(b) - richness(a) || a.distKm - b.distKm);
   }
-  let lists = defs.map(d => (byCuisine[d.id] || []).slice(0, 6));
+  let lists = defs.map(d => (byCuisine[d.id] || []).slice(0, per));
   if (lists.flat().length < 3) {
     source = 'demo';
     const demo = demoPlaces(defs, origin);
     lists = defs.map(d => demo.filter(x => x.cuisineId === d.id));
   }
   const out = [];
-  for (let i = 0; i < 6; i++) lists.forEach(l => l[i] && out.push(l[i]));
+  for (let i = 0; i < per; i++) lists.forEach(l => l[i] && out.push(l[i]));
   return { source, list: out };
 }
 
@@ -265,7 +283,7 @@ function fromGoogle(p, def, origin) {
 // Well-rated, well-reviewed, close by.
 const gScore = r => (r.rating || 3.6) + Math.min(1, Math.log10(1 + r.ratingCount) / 3) - r.distKm * 0.06;
 
-export async function findGoogle({ lat, lon, cuisines, diet = 'any', key }) {
+export async function findGoogle({ lat, lon, cuisines, diet = 'any', key, per = 6 }) {
   const origin = { lat, lon };
   const defs = cuisines.map(id => CUISINE_BY_ID[id]).filter(Boolean);
   const seen = new Set();
@@ -279,12 +297,12 @@ export async function findGoogle({ lat, lon, cuisines, diet = 'any', key }) {
         .sort((a, b) => gScore(b) - gScore(a));
       if (picked.length >= 4) break;
     }
-    picked = picked.slice(0, 6);
+    picked = picked.slice(0, per);
     picked.forEach(r => seen.add(r.id));
     lists.push(picked);
   }
   const out = [];
-  for (let i = 0; i < 6; i++) lists.forEach(l => l[i] && out.push(l[i]));
+  for (let i = 0; i < per; i++) lists.forEach(l => l[i] && out.push(l[i]));
   if (out.length < 3) throw new Error('Google found too few places');
   return { source: 'google', list: out };
 }
@@ -366,7 +384,7 @@ function fromOverture(rec, def, origin) {
 const oScore = r => r.strength + r.conf + (r.website ? .15 : 0) + (r.social ? .15 : 0) + (r.phone ? .1 : 0)
   - r.distKm * .08 - (BARISH.test(r.name) ? .6 : 0);
 
-export async function findOverture({ lat, lon, cuisines, diet = 'any' }) {
+export async function findOverture({ lat, lon, cuisines, diet = 'any', per = 6 }) {
   const index = await loadIndex();
   if (!index) throw new Error('No Overture tiles');
   const T = index.tile;
@@ -395,9 +413,9 @@ export async function findOverture({ lat, lon, cuisines, diet = 'any' }) {
     }
     if (defs.every(d => (byCuisine[d.id] || []).filter(r => r.strength > 1).length >= 4)) break;
   }
-  const lists = defs.map(d => (byCuisine[d.id] || []).sort((a, b) => oScore(b) - oScore(a)).slice(0, 6));
+  const lists = defs.map(d => (byCuisine[d.id] || []).sort((a, b) => oScore(b) - oScore(a)).slice(0, per));
   const out = [];
-  for (let i = 0; i < 6; i++) lists.forEach(l => l[i] && out.push(l[i]));
+  for (let i = 0; i < per; i++) lists.forEach(l => l[i] && out.push(l[i]));
   if (out.length < 3) throw new Error('Too few Overture places here');
   return { source: 'overture', list: out };
 }

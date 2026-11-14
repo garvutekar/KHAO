@@ -62,8 +62,7 @@ function firebaseStore(base) {
     create: (id, data) => put(`${base}/groups/${id}.json`, data),
     set: (id, path, value) => put(`${base}/groups/${id}/${path}.json`, value),
     subscribe(id, cb) {
-      let state = null;
-      const es = new EventSource(`${base}/groups/${id}.json`);
+      let state = null, es = null, retry = null, closed = false;
       const apply = (type, e) => {
         const { path, data } = JSON.parse(e.data);
         if (type === 'put') {
@@ -74,9 +73,28 @@ function firebaseStore(base) {
         }
         cb(state ? structuredClone(state) : null);
       };
-      es.addEventListener('put', e => apply('put', e));
-      es.addEventListener('patch', e => apply('patch', e));
-      return () => es.close();
+      // Phones sleep and switch networks; a dropped stream would freeze the squad, so reopen it.
+      // Firebase re-sends the whole group on connect, so nothing is missed.
+      const open = () => {
+        if (closed) return;
+        es?.close();
+        es = new EventSource(`${base}/groups/${id}.json`);
+        es.addEventListener('put', e => apply('put', e));
+        es.addEventListener('patch', e => apply('patch', e));
+        es.addEventListener('cancel', () => { clearTimeout(retry); retry = setTimeout(open, 3000); });
+        es.onerror = () => { if (es.readyState === EventSource.CLOSED) { clearTimeout(retry); retry = setTimeout(open, 2000); } };
+      };
+      const wake = () => { if (!document.hidden && (!es || es.readyState === EventSource.CLOSED)) open(); };
+      document.addEventListener('visibilitychange', wake);
+      addEventListener('online', open);
+      open();
+      return () => {
+        closed = true;
+        clearTimeout(retry);
+        es?.close();
+        document.removeEventListener('visibilitychange', wake);
+        removeEventListener('online', open);
+      };
     },
   };
 }
